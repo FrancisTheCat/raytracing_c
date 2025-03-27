@@ -56,30 +56,30 @@ typedef union {
 })
 
 internal inline Matrix_3x3 matrix_3x3_rotate(Vec3 v, f32 radians) {
-	f32 c = cos_f32(radians);
-	f32 s = sin_f32(radians);
+  f32 c = cos_f32(radians);
+  f32 s = sin_f32(radians);
 
-	Vec3 a = vec3_normalize(v);
-	Vec3 t = vec3_scale(a, 1 - c);
+  Vec3 a = vec3_normalize(v);
+  Vec3 t = vec3_scale(a, 1 - c);
 
-	Matrix_3x3 rot = MATRIX_3X3_IDENTITY;
+  Matrix_3x3 rot = MATRIX_3X3_IDENTITY;
 
-	rot.rows[0][0] = c + t.data[0] * a.data[0];
-	rot.rows[1][0] = 0 + t.data[0] * a.data[1] + s * a.data[2];
-	rot.rows[2][0] = 0 + t.data[0] * a.data[2] - s * a.data[1];
-	rot.rows[3][0] = 0;
+  rot.rows[0][0] = c + t.data[0] * a.data[0];
+  rot.rows[1][0] = 0 + t.data[0] * a.data[1] + s * a.data[2];
+  rot.rows[2][0] = 0 + t.data[0] * a.data[2] - s * a.data[1];
+  rot.rows[3][0] = 0;
 
-	rot.rows[0][1] = 0 + t.data[1] * a.data[0] - s * a.data[2];
-	rot.rows[1][1] = c + t.data[1] * a.data[1];
-	rot.rows[2][1] = 0 + t.data[1] * a.data[2] + s * a.data[0];
-	rot.rows[3][1] = 0;
+  rot.rows[0][1] = 0 + t.data[1] * a.data[0] - s * a.data[2];
+  rot.rows[1][1] = c + t.data[1] * a.data[1];
+  rot.rows[2][1] = 0 + t.data[1] * a.data[2] + s * a.data[0];
+  rot.rows[3][1] = 0;
 
-	rot.rows[0][2] = 0 + t.data[2] * a.data[0] + s * a.data[1];
-	rot.rows[1][2] = 0 + t.data[2] * a.data[1] - s * a.data[0];
-	rot.rows[2][2] = c + t.data[2] * a.data[2];
-	rot.rows[3][2] = 0;
+  rot.rows[0][2] = 0 + t.data[2] * a.data[0] + s * a.data[1];
+  rot.rows[1][2] = 0 + t.data[2] * a.data[1] - s * a.data[0];
+  rot.rows[2][2] = c + t.data[2] * a.data[2];
+  rot.rows[3][2] = 0;
 
-	return rot;
+  return rot;
 }
 
 internal thread_local u32 random_state = 0;
