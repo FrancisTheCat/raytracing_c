@@ -1,86 +1,16 @@
-#include "codin/codin.h"
-
-#include "codin/image.h"
-#include "codin/linalg.h"
-#include "codin/os.h"
-#include "codin/fmt.h"
-#include "codin/time.h"
-#include "codin/thread.h"
-#include "codin/sort.h"
-#include "codin/math.h"
-
-#include "codin/obj.h"
-
-#include "stdatomic.h"
-#include "immintrin.h"
+#include "raytracer.h"
 
 #define WIDTH       (1024)
 #define HEIGHT      (1024)
-#define SAMPLES     (8)
+#define SAMPLES     (64)
 #define MAX_BOUNCES 8
 #define USE_BVH     1
 #define USE_THREADS 1
 #define N_THREADS   16
 
-#define SIMPLE_BACKGOUND false
+#define USE_CACHED_BVH 0
 
-#define EPSILON     0.000001f
-
-#undef  IDX
-#define IDX(arr, i) (arr).data[(i)]
-
-typedef __m256  f32x8;
-typedef __m256i i32x8;
-
-typedef struct {
-  f32x8 x, y;
-} Vec2x8;
-
-typedef struct {
-  f32x8 x, y, z;
-} Vec3x8;
-
-typedef union {
-  struct {
-    f32 rows[3][3];
-  };
-  f32 data[3 * 3];
-} Matrix_3x3;
-
-#define MATRIX_3X3_IDENTITY ((Matrix_3x3) { \
-  .rows = {                                 \
-    {1, 0, 0},                              \
-    {0, 1, 0},                              \
-    {0, 0, 1},                              \
-  },                                        \
-})
-
-internal inline Matrix_3x3 matrix_3x3_rotate(Vec3 v, f32 radians) {
-  f32 c = cos_f32(radians);
-  f32 s = sin_f32(radians);
-
-  Vec3 a = vec3_normalize(v);
-  Vec3 t = vec3_scale(a, 1 - c);
-
-  Matrix_3x3 rot = MATRIX_3X3_IDENTITY;
-
-  rot.rows[0][0] = c + t.data[0] * a.data[0];
-  rot.rows[1][0] = 0 + t.data[0] * a.data[1] + s * a.data[2];
-  rot.rows[2][0] = 0 + t.data[0] * a.data[2] - s * a.data[1];
-  rot.rows[3][0] = 0;
-
-  rot.rows[0][1] = 0 + t.data[1] * a.data[0] - s * a.data[2];
-  rot.rows[1][1] = c + t.data[1] * a.data[1];
-  rot.rows[2][1] = 0 + t.data[1] * a.data[2] + s * a.data[0];
-  rot.rows[3][1] = 0;
-
-  rot.rows[0][2] = 0 + t.data[2] * a.data[0] + s * a.data[1];
-  rot.rows[1][2] = 0 + t.data[2] * a.data[1] - s * a.data[0];
-  rot.rows[2][2] = c + t.data[2] * a.data[2];
-  rot.rows[3][2] = 0;
-
-  return rot;
-}
+internal Slice(Material) materials;
 
 internal thread_local u32 random_state = 0;
 
@@ -113,39 +43,6 @@ Vec3 rand_vec3() {
   }
 }
 
-typedef struct {
-  Vec3 position;
-  Vec3 direction;
-} Ray;
-
-typedef struct {
-  Vec3   albedo;
-  f32    roughness;
-  u8     type;
-} Material;
-
-enum {
-  Material_Type_Metal,
-  Material_Type_Diffuse,
-  // Material_Type_Dielectric,
-};
-
-typedef struct {
-  f32      distance;
-  Vec3     normal, point;
-  Vec2     tex_coords;
-  Material material;
-} Hit;
-
-typedef struct {
-  f32      *position_x;
-  f32      *position_y;
-  f32      *position_z;
-  f32      *radius;
-  Material *material;
-  isize     len;
-} Spheres;
-
 internal inline f32x8 ray_spheres_hit_8(Ray *ray, Spheres *spheres, isize offset) {
   f32x8 x = _mm256_load_ps(spheres->position_x + offset * 8);
   f32x8 y = _mm256_load_ps(spheres->position_y + offset * 8);
@@ -171,7 +68,7 @@ internal inline f32x8 ray_spheres_hit_8(Ray *ray, Spheres *spheres, isize offset
   f32x8 d = b * b - 4.0f * a * c;
   f32x8 d_sqrt = _mm256_sqrt_ps(d);
 
-  f32x8 hit_mask = _mm256_cmp_ps(d, _mm256_set1_ps(0), _CMP_LE_OQ);
+  f32x8 hit_mask = _mm256_cmp_ps(d, _mm256_setzero_ps(), _CMP_LE_OQ);
 
   f32x8 distance = (-b - d_sqrt) / (2.0f * a);
 
@@ -205,34 +102,6 @@ internal inline Vec3x8 vec3x8_mul(Vec3x8 a, Vec3x8 b) {
 internal inline f32x8 vec3x8_dot(Vec3x8 a, Vec3x8 b) {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
-
-typedef struct {
-  Vec3     a, b, c;
-  Vec3     normal_a, normal_b, normal_c;
-  Vec2     tex_coords_a, tex_coords_b, tex_coords_c;
-  Material material;
-} Triangle;
-
-typedef Slice(Triangle) Triangle_Slice;
-
-typedef struct {
-    Vec3     normal_a, normal_b, normal_c;
-    Vec2     tex_coords_a, tex_coords_b, tex_coords_c;
-    Material material;
-} Triangle_AOS;
-
-// SOA Vector, actual allocation starts at `a_x` and has a size of TRIANGLE_ALLOCATION_SIZE(N)
-typedef struct {
-  f32          *a_x, *a_y, *a_z;
-  f32          *b_x, *b_y, *b_z;
-  f32          *c_x, *c_y, *c_z;
-  Triangle_AOS *aos;
-  i32           len, cap;
-  Allocator     allocator;
-} Triangles;
-
-#define TRIANGLES_ALLOCATION_SIZE(N) \
-  ((N) * (size_of(f32) * 9 + size_of(Triangle_AOS)))
 
 internal void triangles_init(Triangles *triangles, isize len, isize cap, Allocator allocator) {
   if (cap % 8) {
@@ -316,7 +185,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
     triangles->c_y[triangles->len + i] = t.c.y;
     triangles->c_z[triangles->len + i] = t.c.z;
 
-    triangles->aos[triangles->len + i] = ((Triangle_AOS) {
+    triangles->aos[triangles->len + i] = (Triangle_AOS) {
       .material     = t.material,
       .normal_a     = t.normal_a,
       .normal_b     = t.normal_b,
@@ -324,7 +193,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
       .tex_coords_a = t.tex_coords_a,
       .tex_coords_b = t.tex_coords_b,
       .tex_coords_c = t.tex_coords_c,
-    });
+    };
   });
   triangles->len += v.len;
 }
@@ -348,7 +217,7 @@ internal inline f32 min_f32x8(f32x8 vec, f32 epsilon, i32 *index) {
   return min_value;
 }
 
-internal inline void ray_triangles_hit_8(
+internal inline b8 ray_triangles_hit_8(
   Ray       *ray,
   Triangles *triangles,
   isize      offset,
@@ -449,31 +318,12 @@ internal inline void ray_triangles_hit_8(
       .y = triangles->aos[t].tex_coords_a.y * t0 + triangles->aos[t].tex_coords_b.y * t1 + triangles->aos[t].tex_coords_c.y * t2,
     );
     hit->material   = triangles->aos[t].material;
+
+    return true;
   }
+
+  return false;
 }
-
-typedef struct {
-  f32  *min_x;
-  f32  *min_y;
-  f32  *min_z;
-  f32  *max_x;
-  f32  *max_y;
-  f32  *max_z;
-  isize len;
-} AABBs;
-
-typedef struct {
-  i32 index: 31;
-  b8  leaf:   1;
-} BVH_Index;
-
-STATIC_ASSERT(size_of(BVH_Index) == size_of(i32));
-
-typedef struct {
-  Vec3x8    mins;
-  Vec3x8    maxs;
-  BVH_Index children[8];
-} BVH_Node;
 
 internal inline u8 ray_aabbs_hit_8(
   Ray   *ray,
@@ -514,49 +364,182 @@ internal inline u8 ray_aabbs_hit_8(
   return _mm256_movemask_ps(_mm256_cmp_ps(t_minv, t_maxv, _CMP_LT_OQ));
 }
 
-typedef struct {
-  Vector(BVH_Node) nodes;
-  Triangles        triangles;
-  BVH_Index        root;
-} BVH;
+internal f32 aabb_surface_area(AABB *aabb) {
+  f32 x = aabb->max.x - aabb->min.x;
+  f32 y = aabb->max.y - aabb->min.y;
+  f32 z = aabb->max.z - aabb->min.z;
+  return 2.0f * (x * y + y * z + z * x);
+}
+
+internal void aabb_union(AABB *a, AABB *b, AABB *c) {
+  c->min = vec3(
+    min(a->min.x, b->min.x),
+    min(a->min.y, b->min.y),
+    min(a->min.z, b->min.z),
+  );
+  c->max = vec3(
+    max(a->max.x, b->max.x),
+    max(a->max.y, b->max.y),
+    max(a->max.z, b->max.z),
+  );
+}
+
+internal void aabb_triangle(Triangle *triangle, AABB *aabb) {
+  aabb->min = vec3(
+    min(triangle->a.x, min(triangle->b.x, triangle->c.x)) - EPSILON,
+    min(triangle->a.y, min(triangle->b.y, triangle->c.y)) - EPSILON,
+    min(triangle->a.z, min(triangle->b.z, triangle->c.z)) - EPSILON,
+  );
+  aabb->max = vec3(
+    max(triangle->a.x, max(triangle->b.x, triangle->c.x)) + EPSILON,
+    max(triangle->a.y, max(triangle->b.y, triangle->c.y)) + EPSILON,
+    max(triangle->a.z, max(triangle->b.z, triangle->c.z)) + EPSILON,
+  );
+}
+
+internal void aabb_triangle_slice(Triangle_Slice triangles, AABB *aabb) {
+  *aabb = (AABB) {0};
+
+  slice_iter_v(triangles, t, i, {
+    AABB t_aabb;
+    aabb_triangle(&t, &t_aabb);
+    if (!i) {
+      *aabb = t_aabb;
+    }
+    aabb_union(aabb, &t_aabb, aabb);
+  });
+}
+
+internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
+  assert(axis <  3);
+  assert(axis >= 0);
+  sort_slice_by(
+    slice,
+    i,
+    j,
+    ({
+      AABB aabb_i, aabb_j;
+      aabb_triangle(&IDX(slice, i), &aabb_i);
+      aabb_triangle(&IDX(slice, j), &aabb_j);
+
+      aabb_i.min.data[axis] < aabb_j.min.data[axis];
+    })
+  );
+}
 
 #if USE_BVH
-BVH       bvh;
-#else
-Triangles scene_triangles;
-#endif
+  #include "bvh.c"
 
-internal void ray_bvh_node_hit(Ray *ray, BVH *bvh, BVH_Node *node, Hit *hit) {
-  u8 aabb_hits = ray_aabbs_hit_8(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
-  u8 mask      = 1;
+  internal void ray_bvh_node_hit(Ray *ray, BVH *bvh, BVH_Node *node, Hit *hit, i32 depth) {
+    u8 aabb_hits = ray_aabbs_hit_8(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
+    u8 mask      = 1;
 
-  for_range(offset, 0, 8) {
-    if (aabb_hits & mask) {
-      BVH_Index idx = node->children[offset];
-      if (idx.leaf) {
-        ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit);
-      } else {
-        ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, idx.index), hit);
+    for_range(offset, 0, 8) {
+      if (aabb_hits & mask) {
+        BVH_Index idx = node->children[offset];
+        if (idx.leaf) {
+          if (ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit)) {
+            hit->bvh_depth = depth;
+          }
+        } else {
+          ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, idx.index), hit, depth + 1);
+        }
+      }
+      mask <<= 1;
+    }
+  }
+
+  internal void ray_bvh_hit(Ray *ray, BVH *bvh, Hit *hit) {
+    if (bvh->root.leaf) {
+      ray_triangles_hit_8(ray, &bvh->triangles, bvh->root.index, hit);
+    } else {
+      ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, bvh->root.index), hit, 1);
+    }
+  }
+
+  internal BVH_Index bvh_build(BVH *bvh, Triangle_Slice triangles) {
+    if (triangles.len <= 8) {
+      BVH_Index idx = { .index = bvh->triangles.len, .leaf = true, };
+      triangles_append(&bvh->triangles, triangles);
+      while (bvh->triangles.len % 8) {
+        bvh->triangles.len += 1;
+      }
+      assert(bvh->triangles.len <= bvh->triangles.cap);
+      return idx;
+    }
+
+    Triangle_Slice slices[8] = { triangles, };
+    isize n_slices = 1;
+
+    while (n_slices < 8) {
+      isize _n_slices = n_slices;
+      for_range(slice_i, 0, _n_slices) {
+        Triangle_Slice slice = slices[slice_i];
+        if (slice.len <= 8) {
+          n_slices += 1;
+          continue;
+        }
+        f32 min_surface_area = F32_INFINITY;
+        i32 best_axis;
+        for_range(axis, 0, 3) {
+          sort_triangle_slice(slice, axis);
+          AABB a, b;
+          aabb_triangle_slice(slice_end(slice,   slice.len / 2), &a);
+          aabb_triangle_slice(slice_start(slice, slice.len / 2), &b);
+          f32 surface_area = aabb_surface_area(&a) + aabb_surface_area(&b);
+          if (surface_area <= min_surface_area) {
+            min_surface_area = surface_area;
+            best_axis        = axis;
+          }
+        }
+
+        if (best_axis != 2) {
+          sort_triangle_slice(slice, best_axis);
+        }
+
+        slices[slice_i ] = slice_end(slice,   slice.len / 2);
+        slices[n_slices] = slice_start(slice, slice.len / 2);
+        n_slices += 1;
       }
     }
-    mask <<= 1;
-  }
-}
+  
+    BVH_Node node = {0};
+    BVH_Index index = (BVH_Index) { .index = bvh->nodes.len, .leaf = false, };
+    vector_append(&bvh->nodes, node);
 
-internal void ray_bvh_hit(Ray *ray, BVH *bvh, Hit *hit) {
-  if (bvh->root.leaf) {
-    ray_triangles_hit_8(ray, &bvh->triangles, bvh->root.index, hit);
-  } else {
-    ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, bvh->root.index), hit);
+    slice_iter_v(slice_array(Slice(Triangle_Slice), slices), tris, i, {
+      AABB aabb;
+      aabb_triangle_slice(tris, &aabb);
+
+      node.mins.x[i] = aabb.min.x;
+      node.mins.y[i] = aabb.min.y;
+      node.mins.z[i] = aabb.min.z;
+
+      node.maxs.x[i] = aabb.max.x;
+      node.maxs.y[i] = aabb.max.y;
+      node.maxs.z[i] = aabb.max.z;
+
+      node.children[i] = bvh_build(bvh, tris);
+    });
+
+    IDX(bvh->nodes, index.index) = node;
+    return index;
   }
-}
+
+  internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocator) {
+    vector_init(&bvh->nodes, 0, 8, allocator);
+    triangles_init(&bvh->triangles, 0, src_triangles.len * 8, allocator);
+    bvh->root = bvh_build(bvh, src_triangles);
+  }
+
+  BVH       bvh;
+#else
+  Triangles scene_triangles;
+#endif
 
 Image background_image = {0};
 
 Vec3 sample_background(Vec3 dir) {
-#if SIMPLE_BACKGROUND
-  return vec3_lerp(vec3(0.5f, 0.7f, 1.0f), vec3(1.0f, 1.0f, 1.0f), 0.5f * (-ray.direction.y + 1));
-#else
   f32 invPi    = 1.0f / PI;
   f32 invTwoPi = 1.0f / (2.0f * PI);
 
@@ -576,7 +559,6 @@ Vec3 sample_background(Vec3 dir) {
   );
 
   return color;
-#endif
 }
 
 internal inline void ray_triangles_hit(Ray *ray, Triangles *triangles, Hit *hit) {
@@ -621,11 +603,6 @@ internal Vec3 sample_texture(Image *texture, Vec2 tex_coords) {
   );
 }
 
-Image texture_albedo          = {0};
-Image texture_normal          = {0};
-Image texture_metal_roughness = {0};
-Image texture_emission        = {0};
-
 Color3 cast_ray(Ray ray) {
   Color3 accumulated_tint = vec3(1, 1, 1);
   Color3 emission         = {0};
@@ -640,26 +617,43 @@ Color3 cast_ray(Ray ray) {
       // if (vec3_dot(hit.normal, ray.direction) > 0) {
       //   hit.normal = vec3_scale(hit.normal, -1);
       // }
-      ray.position = vec3_add(hit.point, vec3_scale(hit.normal, 0.001f));
+      // f32 depth = hit.bvh_depth * 0.2;
+      // return vec3_broadcast(depth);
+
+      hit.normal   = vec3_normalize(hit.normal);
+      ray.position = vec3_add(hit.point, vec3_scale(hit.normal, EPSILON));
+
+      Material material = IDX(materials, hit.material);
 
       // return vec3_broadcast(hit.distance * 0.25);
       // return vec3_add(vec3_scale(hit.normal, 0.5), vec3(0.5, 0.5, 0.5));
       // return vec3(hit.tex_coords.x, hit.tex_coords.y, 0);
 
-#if 1
-      Vec3 mr = sample_texture(&texture_metal_roughness, hit.tex_coords);
-      if (mr.b > 0.5) {
-        hit.material.type = Material_Type_Metal;
-      } else {
-        hit.material.type = Material_Type_Diffuse;
+      if (material.texture_albedo) {
+        material.albedo = vec3_mul(material.albedo, sample_texture(material.texture_albedo, hit.tex_coords));
       }
-      hit.material.roughness = mr.g;
-#endif
 
-      switch (hit.material.type) {
+      Color3 e = material.emission;
+
+      if (material.texture_emission) {
+        e = vec3_mul(e, sample_texture(material.texture_emission, hit.tex_coords));
+      }
+      emission = vec3_add(emission, vec3_mul(e, accumulated_tint));
+
+      if (material.texture_metal_roughness) {
+        Vec3 mr = sample_texture(material.texture_metal_roughness, hit.tex_coords);
+        if (mr.b > 0.5f) {
+          material.type = Material_Type_Metal;
+        } else {
+          material.type = Material_Type_Diffuse;
+        }
+        material.roughness *= mr.g;
+      }
+
+      switch (material.type) {
       CASE Material_Type_Metal:
         Vec3 dir      = vec3_reflect(ray.direction, hit.normal);
-             dir      = vec3_add(dir, vec3_scale(rand_vec3(), hit.material.roughness));
+             dir      = vec3_add(dir, vec3_scale(rand_vec3(), material.roughness));
         ray.direction = vec3_normalize(dir);
       CASE Material_Type_Diffuse:
         ray.direction = vec3_normalize(vec3_add(rand_vec3(), hit.normal));
@@ -667,13 +661,7 @@ Color3 cast_ray(Ray ray) {
 
       // return vec3_add(vec3_scale(ray.direction, 0.5), vec3(0.5, 0.5, 0.5));
 
-#if 1
-      hit.material.albedo = vec3_mul(hit.material.albedo, sample_texture(&texture_albedo, hit.tex_coords));
-      Vec3 e = vec3_mul(sample_texture(&texture_emission, hit.tex_coords), accumulated_tint);
-      emission = vec3_add(emission, e);
-#endif
-
-      accumulated_tint = vec3_mul(accumulated_tint, hit.material.albedo);
+      accumulated_tint = vec3_mul(accumulated_tint, material.albedo);
     } else {
       return vec3_add(vec3_mul(sample_background(ray.direction), accumulated_tint), emission);
     }
@@ -789,10 +777,15 @@ void render_thread_proc(rawptr _arg) {
       }
 
       color = vec3_scale(color, 1.0f / SAMPLES);
+      // color = vec3(
+      //   aces_f32(color.r),
+      //   aces_f32(color.g),
+      //   aces_f32(color.b),
+      // );
       color = vec3(
-        aces_f32(color.r),
-        aces_f32(color.g),
-        aces_f32(color.b),
+        clamp(color.r, 0, 1),
+        clamp(color.g, 0, 1),
+        clamp(color.b, 0, 1),
       );
       // color = vec3(
       //   pow_f32(color.r, 1.0f / 2.2f),
@@ -810,137 +803,6 @@ void render_thread_proc(rawptr _arg) {
   }
 }
 
-typedef struct {
-  Vec3 min, max;
-} AABB;
-
-internal void aabb_union(AABB *a, AABB *b, AABB *c) {
-  c->min = vec3(
-    min(a->min.x, b->min.x),
-    min(a->min.y, b->min.y),
-    min(a->min.z, b->min.z),
-  );
-  c->max = vec3(
-    max(a->max.x, b->max.x),
-    max(a->max.y, b->max.y),
-    max(a->max.z, b->max.z),
-  );
-}
-
-internal void aabb_triangle(Triangle *triangle, AABB *aabb) {
-  aabb->min = vec3(
-    min(triangle->a.x, min(triangle->b.x, triangle->c.x)) - EPSILON,
-    min(triangle->a.y, min(triangle->b.y, triangle->c.y)) - EPSILON,
-    min(triangle->a.z, min(triangle->b.z, triangle->c.z)) - EPSILON,
-  );
-  aabb->max = vec3(
-    max(triangle->a.x, max(triangle->b.x, triangle->c.x)) + EPSILON,
-    max(triangle->a.y, max(triangle->b.y, triangle->c.y)) + EPSILON,
-    max(triangle->a.z, max(triangle->b.z, triangle->c.z)) + EPSILON,
-  );
-}
-
-internal void aabb_triangle_slice(Triangle_Slice triangles, AABB *aabb) {
-  *aabb = (AABB) {0};
-
-  slice_iter_v(triangles, t, _i, {
-    AABB t_aabb;
-    aabb_triangle(&t, &t_aabb);
-    aabb_union(aabb, &t_aabb, aabb);
-  });
-}
-
-internal BVH_Index bvh_build(BVH *bvh, Triangle_Slice triangles) {
-  if (triangles.len <= 8) {
-    BVH_Index idx = { .index = bvh->triangles.len, .leaf = true, };
-    triangles_append(&bvh->triangles, triangles);
-    while (bvh->triangles.len % 8) {
-      bvh->triangles.len += 1;
-    }
-    assert(bvh->triangles.len <= bvh->triangles.cap);
-    return idx;
-  }
-
-  Triangle_Slice slices[8] = { triangles, };
-  isize n_slices = 1;
-
-  AABB aabb;
-  aabb_triangle_slice(triangles, &aabb);
-
-  isize axis = 0;
-  f32 largest_axis = 0;
-  for_range(a, 0, 3) {
-    f32 v = aabb.max.data[a] - aabb.min.data[a];
-    if (v > largest_axis) {
-      largest_axis = v;
-      axis         = a;
-    }
-  }
-
-  while (n_slices < 8) {
-    isize _n_slices = n_slices;
-    for_range(slice_i, 0, _n_slices) {
-      Triangle_Slice slice = slices[slice_i];
-      if (slice.len <= 8) {
-        n_slices += 1;
-        continue;
-      }
-      AABB aabb;
-      aabb_triangle_slice(slice, &aabb);
-
-      sort_slice_by(
-        slice,
-        i,
-        j,
-        ({
-          AABB aabb_i, aabb_j;
-          aabb_triangle(&IDX(slice, i), &aabb_i);
-          aabb_triangle(&IDX(slice, j), &aabb_j);
-
-          f32 center_i = aabb_i.min.data[axis] + aabb_i.max.data[axis];
-          f32 center_j = aabb_j.min.data[axis] + aabb_j.max.data[axis];
-    
-          center_i < center_j;
-        })
-      );
-
-      slices[slice_i ] = slice_end(slice,   slice.len / 2);
-      slices[n_slices] = slice_start(slice, slice.len / 2);
-      n_slices += 1;
-    }
-
-    axis = (axis + 1) % 3;
-  }
-  
-  BVH_Node node = {0};
-  BVH_Index index = (BVH_Index) { .index = bvh->nodes.len, .leaf = false, };
-  vector_append(&bvh->nodes, node);
-
-  slice_iter_v(slice_array(Slice(Triangle_Slice), slices), tris, i, {
-    AABB aabb;
-    aabb_triangle_slice(tris, &aabb);
-
-    node.mins.x[i] = aabb.min.x;
-    node.mins.y[i] = aabb.min.y;
-    node.mins.z[i] = aabb.min.z;
-
-    node.maxs.x[i] = aabb.max.x;
-    node.maxs.y[i] = aabb.max.y;
-    node.maxs.z[i] = aabb.max.z;
-
-    node.children[i] = bvh_build(bvh, tris);
-  });
-
-  IDX(bvh->nodes, index.index) = node;
-  return index;
-}
-
-internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocator) {
-  vector_init(&bvh->nodes, 0, 8, allocator);
-  triangles_init(&bvh->triangles, 0, src_triangles.len * 8, allocator);
-  bvh->root = bvh_build(bvh, src_triangles);
-}
-
 i32 main() {
   context.logger = (Logger) {0};
 
@@ -951,6 +813,10 @@ i32 main() {
     .height     = HEIGHT,
   };
   image.pixels = slice_make_aligned(Byte_Slice, WIDTH * HEIGHT * 3, 64, context.allocator);
+
+  Image texture_albedo          = {0};
+  Image texture_metal_roughness = {0};
+  Image texture_emission        = {0};
 
   b8 bg_image_ok = png_load_bytes(
     unwrap_err(
@@ -1000,33 +866,67 @@ i32 main() {
   camera_fov          = PI / 2.0f;
   camera_focal_length = 0.5f / atan_f32(camera_fov * 0.5f);
 
-  Byte_Slice data = unwrap_err(read_entire_file_path(LIT("helmet.obj"), context.allocator));
-  Obj_File obj = {0};
-  obj_load(bytes_to_string(data), &obj, context.allocator);
+  isize n_triangles = 0;
 
-  Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
+  #if USE_CACHED_BVH
+    Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Read));
+    File_Info fi;
+    OS_Error err = file_stat(bvh_file, &fi);
+    assert(err == OSE_None);
+    Byte_Slice data = slice_make_aligned(Byte_Slice, fi.size, 32, context.allocator);
+    isize n_read = unwrap_err(file_read(bvh_file, data));
+    assert(n_read == fi.size);
+    b8 ok = bvh_load_bytes(data, &bvh);
+    assert(ok);
 
-  slice_iter_v(obj.triangles, t, i, {
-    IDX(triangles, i) = ((Triangle) {
-      .a            = t.a.position,
-      .b            = t.b.position,
-      .c            = t.c.position,
-      .normal_a     = t.a.normal,
-      .normal_b     = t.b.normal,
-      .normal_c     = t.c.normal,
-      .tex_coords_a = t.a.tex_coords,
-      .tex_coords_b = t.b.tex_coords,
-      .tex_coords_c = t.c.tex_coords,
-      .material     = (Material) { .albedo = vec3(1, 1, 1), .type = Material_Type_Diffuse, .roughness = 0.025f, },
+    n_triangles = bvh.triangles.len;
+  #else
+    Byte_Slice data = unwrap_err(read_entire_file_path(LIT("helmet.obj"), context.allocator));
+    Obj_File obj = {0};
+    obj_load(bytes_to_string(data), &obj, context.allocator);
+
+    Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
+
+    slice_init(&materials, 1, context.allocator);
+    IDX(materials, 0) = (Material) {
+      .albedo                  = vec3(1, 1, 1),
+      .emission                = vec3(1, 1, 1),
+      .type                    = Material_Type_Metal,
+      .roughness               = 1.0f,
+      .texture_albedo          = &texture_albedo,
+      .texture_metal_roughness = &texture_metal_roughness,
+      .texture_emission        = &texture_emission,
+    };
+
+    slice_iter_v(obj.triangles, t, i, {
+      IDX(triangles, i) = (Triangle) {
+        .a            = t.a.position,
+        .b            = t.b.position,
+        .c            = t.c.position,
+        .normal_a     = t.a.normal,
+        .normal_b     = t.b.normal,
+        .normal_c     = t.c.normal,
+        .tex_coords_a = t.a.tex_coords,
+        .tex_coords_b = t.b.tex_coords,
+        .tex_coords_c = t.c.tex_coords,
+        .material     = 0,
+      };
     });
-  });
+    #if USE_BVH
+      Timestamp bvh_start_time = time_now();
+      bvh_init(&bvh, triangles, context.allocator);
+      fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
 
-#if USE_BVH
-  bvh_init(&bvh, triangles, context.allocator);
-#else
-  triangles_init(&scene_triangles, 0, triangles.len, context.allocator);
-  triangles_append(&scene_triangles, triangles);
-#endif
+      Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Truncate | FP_Write | FP_Create));
+      Writer bvh_out = writer_from_handle(bvh_file);
+      bvh_save_writer(&bvh_out, &bvh);
+    #else
+      triangles_init(&scene_triangles, 0, triangles.len, context.allocator);
+      triangles_append(&scene_triangles, triangles);
+    #endif
+
+    n_triangles = triangles.len;
+  #endif
 
   fmt_printflnc("Width:     %d", WIDTH);
   fmt_printflnc("Height:    %d", HEIGHT);
@@ -1038,7 +938,9 @@ i32 main() {
 #if USE_BVH
     fmt_printflnc("BVH-Nodes: %d", bvh.nodes.len);
 #endif
-  fmt_printflnc("Triangles: %d", obj.triangles.len);
+  fmt_printflnc("Triangles: %d", n_triangles);
+
+  fmt_printlnc("");
 
   Timestamp start_time = time_now();
 
@@ -1047,7 +949,18 @@ i32 main() {
       thread_create(render_thread_proc, nil, THREAD_STACK_DEFAULT, THREAD_TLS_DEFAULT);
     }
 
-    while (n_done < N_THREADS) { processor_yield(); }
+    while (n_done < N_THREADS) {
+      isize c = cursor;
+      String bar = LIT("====================");
+      f32 p = c / (f32)(WIDTH * HEIGHT);
+      if (p > 1.0f) {
+        p = 1.0f;
+      }
+      fmt_printfc("\r[%-20S] %d%%", slice_end(bar, p * 20), (i32)(100 * p));
+      time_sleep(Millisecond * 500);
+    }
+
+    fmt_printlnc("\r[====================] 100%");
   #else 
     render_thread_proc(nil);
   #endif
