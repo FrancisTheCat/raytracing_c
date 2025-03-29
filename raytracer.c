@@ -319,6 +319,19 @@ internal inline b8 ray_triangles_hit_8(
     );
     hit->material   = triangles->aos[t].material;
 
+    Vec3 edge1 = vec3_sub(vec3(triangles->b_x[t], triangles->b_y[t], triangles->b_z[t]), vec3(triangles->a_x[t], triangles->a_y[t], triangles->a_z[t]));
+    Vec3 edge2 = vec3_sub(vec3(triangles->c_x[t], triangles->c_y[t], triangles->c_z[t]), vec3(triangles->a_x[t], triangles->a_y[t], triangles->a_z[t]));
+
+    Vec2 delta_uv1 = vec2_sub(triangles->aos[t].tex_coords_b, triangles->aos[t].tex_coords_a);
+    Vec2 delta_uv2 = vec2_sub(triangles->aos[t].tex_coords_c, triangles->aos[t].tex_coords_a);
+
+    f32 d = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
+    if (abs_f32(d) < EPSILON) {
+      d = 1.0f;
+    }
+
+    hit->tangent = vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), 1.0f / d);
+
     return true;
   }
 
@@ -438,9 +451,7 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
       if (aabb_hits & mask) {
         BVH_Index idx = node->children[offset];
         if (idx.leaf) {
-          if (ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit)) {
-            hit->bvh_depth = depth;
-          }
+          ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit);
         } else {
           ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, idx.index), hit, depth + 1);
         }
@@ -617,8 +628,6 @@ Color3 cast_ray(Ray ray) {
       // if (vec3_dot(hit.normal, ray.direction) > 0) {
       //   hit.normal = vec3_scale(hit.normal, -1);
       // }
-      // f32 depth = hit.bvh_depth * 0.2;
-      // return vec3_broadcast(depth);
 
       hit.normal   = vec3_normalize(hit.normal);
       ray.position = vec3_add(hit.point, vec3_scale(hit.normal, EPSILON));
@@ -627,6 +636,7 @@ Color3 cast_ray(Ray ray) {
 
       // return vec3_broadcast(hit.distance * 0.25);
       // return vec3_add(vec3_scale(hit.normal, 0.5), vec3(0.5, 0.5, 0.5));
+      // return vec3_add(vec3_scale(vec3_normalize(hit.tangent), 0.5), vec3(0.5, 0.5, 0.5));
       // return vec3(hit.tex_coords.x, hit.tex_coords.y, 0);
 
       if (material.texture_albedo) {
@@ -634,7 +644,6 @@ Color3 cast_ray(Ray ray) {
       }
 
       Color3 e = material.emission;
-
       if (material.texture_emission) {
         e = vec3_mul(e, sample_texture(material.texture_emission, hit.tex_coords));
       }
@@ -648,6 +657,23 @@ Color3 cast_ray(Ray ray) {
           material.type = Material_Type_Diffuse;
         }
         material.roughness *= mr.g;
+      }
+
+      if (material.texture_normal) {
+        Vec3 v = sample_texture(material.texture_normal, hit.tex_coords);
+             v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
+
+        Vec3 t = vec3_normalize(hit.tangent);
+        Vec3 b = vec3_cross(hit.normal, hit.tangent);
+        Vec3 n = hit.normal;
+
+        hit.normal = vec3_normalize(
+          vec3(
+            .x = v.x * t.x + v.y * b.x + v.z * n.x,
+            .y = v.x * t.y + v.y * b.y + v.z * n.y,
+            .z = v.x * t.z + v.y * b.z + v.z * n.z,
+          )
+        );
       }
 
       switch (material.type) {
@@ -817,6 +843,7 @@ i32 main() {
   Image texture_albedo          = {0};
   Image texture_metal_roughness = {0};
   Image texture_emission        = {0};
+  Image texture_normal          = {0};
 
   b8 bg_image_ok = png_load_bytes(
     unwrap_err(
@@ -854,6 +881,16 @@ i32 main() {
       context.allocator)
     ),
     &texture_emission,
+    context.allocator
+  );
+  assert(tex_image_ok);
+
+  tex_image_ok = png_load_bytes(
+    unwrap_err(
+      read_entire_file_path(LIT("helmet_normal.png"),
+      context.allocator)
+    ),
+    &texture_normal,
     context.allocator
   );
   assert(tex_image_ok);
@@ -896,6 +933,7 @@ i32 main() {
       .texture_albedo          = &texture_albedo,
       .texture_metal_roughness = &texture_metal_roughness,
       .texture_emission        = &texture_emission,
+      .texture_normal          = &texture_normal,
     };
 
     slice_iter_v(obj.triangles, t, i, {

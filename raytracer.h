@@ -22,8 +22,7 @@
 #undef  IDX
 #define IDX(arr, i) (arr).data[(i)]
 
-typedef __m256  f32x8;
-typedef __m256i i32x8;
+typedef __m256 f32x8;
 
 typedef struct {
   f32x8 x, y;
@@ -100,10 +99,9 @@ enum {
 
 typedef struct {
   f32         distance;
-  Vec3        normal, point;
+  Vec3        normal, point, tangent;
   Vec2        tex_coords;
   Material_Id material;
-  i32         bvh_depth;
   b8          back_face;
 } Hit;
 
@@ -126,7 +124,7 @@ typedef struct {
 typedef Slice(Triangle) Triangle_Slice;
 
 typedef struct {
-  Vec3        normal_a, normal_b, normal_c;
+  Vec3        normal_a,     normal_b,     normal_c;
   Vec2        tex_coords_a, tex_coords_b, tex_coords_c;
   Material_Id material;
 } Triangle_AOS;
