@@ -79,54 +79,53 @@ typedef struct {
   Vec3 direction;
 } Ray;
 
-typedef i32 Material_Id;
+typedef struct {
+  Vec3 direction, normal, tangent;
+  Vec2 tex_coords;
+} Shader_Input;
 
 typedef struct {
-  Vec3   albedo, emission;
-  f32    roughness;
-  u8     type;
-  Image *texture_albedo;
-  Image *texture_normal;
-  Image *texture_metal_roughness;
-  Image *texture_emission;
-} Material;
+  Vec3   direction;
+  Color3 tint, emission;
+} Shader_Output;
 
-enum {
-  Material_Type_Metal,
-  Material_Type_Diffuse,
-  // Material_Type_Dielectric,
-};
+typedef void (*Shader_Proc)(rawptr, Shader_Input const *, Shader_Output *);
+
+typedef struct {
+  rawptr      data;
+  Shader_Proc proc;
+} Shader;
 
 typedef struct {
   f32         distance;
   Vec3        normal, point, tangent;
   Vec2        tex_coords;
-  Material_Id material;
+  Shader      shader;
   b8          back_face;
 } Hit;
 
 typedef struct {
-  f32         *position_x;
-  f32         *position_y;
-  f32         *position_z;
-  f32         *radius;
-  Material_Id *material;
-  isize        len;
+  f32    *position_x;
+  f32    *position_y;
+  f32    *position_z;
+  f32    *radius;
+  Shader *shader;
+  isize   len;
 } Spheres;
 
 typedef struct {
-  Vec3        a, b, c;
-  Vec3        normal_a, normal_b, normal_c;
-  Vec2        tex_coords_a, tex_coords_b, tex_coords_c;
-  Material_Id material;
+  Vec3   a, b, c;
+  Vec3   normal_a, normal_b, normal_c;
+  Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
+  Shader shader;
 } Triangle;
 
 typedef Slice(Triangle) Triangle_Slice;
 
 typedef struct {
-  Vec3        normal_a,     normal_b,     normal_c;
-  Vec2        tex_coords_a, tex_coords_b, tex_coords_c;
-  Material_Id material;
+  Vec3   normal_a,     normal_b,     normal_c;
+  Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
+  Shader shader;
 } Triangle_AOS;
 
 // SOA Vector, allocation starts at `a_x` and has a size of TRIANGLE_ALLOCATION_SIZE(N)

@@ -2,15 +2,13 @@
 
 #define WIDTH       (1024)
 #define HEIGHT      (1024)
-#define SAMPLES     (128)
+#define SAMPLES     (32)
 #define MAX_BOUNCES 8
 #define USE_BVH     1
 #define USE_THREADS 1
 #define N_THREADS   16
 
 #define USE_CACHED_BVH 0
-
-internal Slice(Material) materials;
 
 internal thread_local u32 random_state = 0;
 
@@ -186,7 +184,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
     triangles->c_z[triangles->len + i] = t.c.z;
 
     triangles->aos[triangles->len + i] = (Triangle_AOS) {
-      .material     = t.material,
+      .shader       = t.shader,
       .normal_a     = t.normal_a,
       .normal_b     = t.normal_b,
       .normal_c     = t.normal_c,
@@ -317,7 +315,7 @@ internal inline b8 ray_triangles_hit_8(
       .x = triangles->aos[t].tex_coords_a.x * t0 + triangles->aos[t].tex_coords_b.x * t1 + triangles->aos[t].tex_coords_c.x * t2,
       .y = triangles->aos[t].tex_coords_a.y * t0 + triangles->aos[t].tex_coords_b.y * t1 + triangles->aos[t].tex_coords_c.y * t2,
     );
-    hit->material   = triangles->aos[t].material;
+    hit->shader     = triangles->aos[t].shader;
 
     Vec3 edge1 = vec3_sub(vec3(triangles->b_x[t], triangles->b_y[t], triangles->b_z[t]), vec3(triangles->a_x[t], triangles->a_y[t], triangles->a_z[t]));
     Vec3 edge2 = vec3_sub(vec3(triangles->c_x[t], triangles->c_y[t], triangles->c_z[t]), vec3(triangles->a_x[t], triangles->a_y[t], triangles->a_z[t]));
@@ -589,10 +587,10 @@ internal inline void ray_spheres_hit(Ray *ray, Spheres *spheres, Hit *hit) {
 
       i32 s = idx + offset * 8;
 
-      hit->point    = vec3_add(ray->position, vec3_scale(ray->direction, hit->distance));
-      hit->normal   = vec3_sub(hit->point, vec3(spheres->position_x[s], spheres->position_y[s], spheres->position_z[s]));
-      hit->normal   = vec3_scale(hit->normal, 1.0f / spheres->radius[s]);
-      hit->material = spheres->material[s];
+      hit->point  = vec3_add(ray->position, vec3_scale(ray->direction, hit->distance));
+      hit->normal = vec3_sub(hit->point, vec3(spheres->position_x[s], spheres->position_y[s], spheres->position_z[s]));
+      hit->normal = vec3_scale(hit->normal, 1.0f / spheres->radius[s]);
+      hit->shader = spheres->shader[s];
     }
   }
 }
@@ -614,6 +612,105 @@ internal Vec3 sample_texture(Image *texture, Vec2 tex_coords) {
   );
 }
 
+typedef struct {
+  Vec3 albedo;
+} Diffuse_Shader_Data;
+
+internal void diffuse_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  Diffuse_Shader_Data const *data = (Diffuse_Shader_Data *)_data;
+
+  output->tint      = data->albedo;
+  output->direction = vec3_normalize(vec3_add(rand_vec3(), input->normal));
+}
+
+typedef struct {
+  Vec3 tint;
+  f32  roughness;
+} Metal_Shader_Data;
+
+internal void metal_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  Metal_Shader_Data const *data = (Metal_Shader_Data *)_data;
+
+  output->tint      = data->tint;
+  output->direction = vec3_normalize(
+    vec3_add(
+      vec3_reflect(input->direction, input->normal),
+      vec3_scale(rand_vec3(), data->roughness)
+    )
+  );
+}
+
+enum {
+  PBR_Type_Metal,
+  PBR_Type_Diffuse,
+  // PBR_Type_Dielectric,
+};
+
+typedef struct {
+  Vec3   albedo, emission;
+  f32    roughness;
+  u8     type;
+  Image *texture_albedo;
+  Image *texture_normal;
+  Image *texture_metal_roughness;
+  Image *texture_emission;
+} PBR_Shader_Data;
+
+internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
+
+  Color3 albedo = data->albedo;
+  if (data->texture_albedo) {
+    albedo = vec3_mul(data->albedo, sample_texture(data->texture_albedo, input->tex_coords));
+  }
+  output->tint = albedo;
+
+  Color3 emmission = data->emission;
+  if (data->texture_emission) {
+    emmission = vec3_mul(emmission, sample_texture(data->texture_emission, input->tex_coords));
+  }
+  output->emission = emmission;
+
+  u8  type      = data->type;
+  f32 roughness = data->roughness;
+  if (data->texture_metal_roughness) {
+    Vec3 mr = sample_texture(data->texture_metal_roughness, input->tex_coords);
+    if (mr.b > 0.5f) {
+      type = PBR_Type_Metal;
+    } else {
+      type = PBR_Type_Diffuse;
+    }
+    roughness *= mr.g;
+  }
+
+  Vec3 normal = input->normal;
+  if (data->texture_normal) {
+    Vec3 v = sample_texture(data->texture_normal, input->tex_coords);
+         v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
+
+    Vec3 t = vec3_normalize(input->tangent);
+    Vec3 b = vec3_cross(input->normal, input->tangent);
+    Vec3 n = input->normal;
+
+    normal = vec3_normalize(
+      vec3(
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 2.0f,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 2.0f,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 2.0f,
+      )
+    );
+  }
+
+  switch (type) {
+  CASE PBR_Type_Metal:
+    Vec3 dir          = vec3_reflect(input->direction, normal);
+         dir          = vec3_add(dir, vec3_scale(rand_vec3(), roughness));
+    output->direction = vec3_normalize(dir);
+  CASE PBR_Type_Diffuse:
+    output->direction = vec3_normalize(vec3_add(rand_vec3(), normal));
+  }
+}
+
 Color3 cast_ray(Ray ray) {
   Color3 accumulated_tint = vec3(1, 1, 1);
   Color3 emission         = {0};
@@ -628,55 +725,19 @@ Color3 cast_ray(Ray ray) {
       hit.normal   = vec3_normalize(hit.normal);
       ray.position = vec3_add(hit.point, vec3_scale(hit.normal, EPSILON));
 
-      Material material = IDX(materials, hit.material);
+      Shader_Input shader_input = {
+        .direction  = ray.direction,
+        .normal     = hit.normal,
+        .tangent    = hit.tangent,
+        .tex_coords = hit.tex_coords,
+      };
+      Shader_Output shader_output = {0};
 
-      if (material.texture_albedo) {
-        material.albedo = vec3_mul(material.albedo, sample_texture(material.texture_albedo, hit.tex_coords));
-      }
+      hit.shader.proc(hit.shader.data, &shader_input, &shader_output);
 
-      Color3 e = material.emission;
-      if (material.texture_emission) {
-        e = vec3_mul(e, sample_texture(material.texture_emission, hit.tex_coords));
-      }
-      emission = vec3_add(emission, vec3_mul(e, accumulated_tint));
-
-      if (material.texture_metal_roughness) {
-        Vec3 mr = sample_texture(material.texture_metal_roughness, hit.tex_coords);
-        if (mr.b > 0.5f) {
-          material.type = Material_Type_Metal;
-        } else {
-          material.type = Material_Type_Diffuse;
-        }
-        material.roughness *= mr.g;
-      }
-
-      if (material.texture_normal) {
-        Vec3 v = sample_texture(material.texture_normal, hit.tex_coords);
-             v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
-
-        Vec3 t = vec3_normalize(hit.tangent);
-        Vec3 b = vec3_cross(hit.normal, hit.tangent);
-        Vec3 n = hit.normal;
-
-        hit.normal = vec3_normalize(
-          vec3(
-            .x = v.x * t.x + v.y * b.x + v.z * n.x,
-            .y = v.x * t.y + v.y * b.y + v.z * n.y,
-            .z = v.x * t.z + v.y * b.z + v.z * n.z,
-          )
-        );
-      }
-
-      switch (material.type) {
-      CASE Material_Type_Metal:
-        Vec3 dir      = vec3_reflect(ray.direction, hit.normal);
-             dir      = vec3_add(dir, vec3_scale(rand_vec3(), material.roughness));
-        ray.direction = vec3_normalize(dir);
-      CASE Material_Type_Diffuse:
-        ray.direction = vec3_normalize(vec3_add(rand_vec3(), hit.normal));
-      }
-
-      accumulated_tint = vec3_mul(accumulated_tint, material.albedo);
+      ray.direction    = shader_output.direction;
+      emission         = vec3_add(emission, vec3_mul(shader_output.emission, accumulated_tint));
+      accumulated_tint = vec3_mul(accumulated_tint, shader_output.tint);
     } else {
       return vec3_add(vec3_mul(sample_background(ray.direction), accumulated_tint), emission);
     }
@@ -882,16 +943,18 @@ i32 main() {
 
     Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
 
-    slice_init(&materials, 1, context.allocator);
-    IDX(materials, 0) = (Material) {
-      .albedo                  = vec3(1, 1, 1),
-      .emission                = vec3(1, 1, 1),
-      .type                    = Material_Type_Metal,
-      .roughness               = 1.0f,
-      .texture_albedo          = &texture_albedo,
-      .texture_metal_roughness = &texture_metal_roughness,
-      .texture_emission        = &texture_emission,
-      .texture_normal          = &texture_normal,
+    Shader shader = {
+      .data = &(PBR_Shader_Data) {
+        .albedo                  = vec3(1, 1, 1),
+        .emission                = vec3(1, 1, 1),
+        .type                    = PBR_Type_Metal,
+        .roughness               = 1.0f,
+        .texture_albedo          = &texture_albedo,
+        .texture_metal_roughness = &texture_metal_roughness,
+        .texture_emission        = &texture_emission,
+        .texture_normal          = &texture_normal,
+      },
+      .proc = pbr_shader_proc,
     };
 
     slice_iter_v(obj.triangles, t, i, {
@@ -905,7 +968,7 @@ i32 main() {
         .tex_coords_a = t.a.tex_coords,
         .tex_coords_b = t.b.tex_coords,
         .tex_coords_c = t.c.tex_coords,
-        .material     = 0,
+        .shader       = shader,
       };
     });
     #if USE_BVH
