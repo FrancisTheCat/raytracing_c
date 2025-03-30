@@ -1,8 +1,8 @@
 #include "raytracer.h"
 
-#define WIDTH       (1024)
-#define HEIGHT      (1024)
-#define SAMPLES     (128)
+#define WIDTH       (1024 * 2)
+#define HEIGHT      (1024 * 2)
+#define SAMPLES     (4)
 #define MAX_BOUNCES 8
 #define USE_THREADS 1
 #define N_THREADS   16
@@ -14,6 +14,8 @@
 #define CHUNKS_X ((WIDTH  + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define CHUNKS_Y ((HEIGHT + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define N_CHUNKS (CHUNKS_X * CHUNKS_Y)
+
+#define EPSILON 0.000001f
 
 #define sample_texture sample_texture_nearest
 // #define sample_texture sample_texture_bilinear
@@ -204,11 +206,8 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
 
     f32 inv_d = 1.0f / d;
 
-    Vec3 normal    = vec3_normalize(vec3_cross(edge2, edge1));
-    Vec3 tangent   = vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d);
-    Vec3 bitangent = vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d);
-    f32  tangent_w = (vec3_dot(vec3_cross(normal, tangent), bitangent) < 0.0f) ? -1.0f : 1.0f;
-    bitangent      = vec3_scale(bitangent, tangent_w);
+    Vec3 tangent   = vec3_normalize(vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d));
+    Vec3 bitangent = vec3_normalize(vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d));
 
     triangles->aos[triangles->len + i] = (Triangle_AOS) {
       .shader       = t.shader,
@@ -763,8 +762,8 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
     Vec3 v = sample_texture(data->texture_normal, input->tex_coords);
          v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
 
-    Vec3 t = vec3_normalize(input->tangent);
-    Vec3 b = vec3_normalize(input->bitangent);
+    Vec3 t = input->tangent;
+    Vec3 b = input->bitangent;
     Vec3 n = input->normal;
 
     normal = vec3_normalize(
@@ -794,8 +793,8 @@ internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_
     Vec3 v = sample_texture(data->texture_normal, input->tex_coords);
          v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
 
-    Vec3 t = vec3_normalize(input->tangent);
-    Vec3 b = vec3_normalize(input->bitangent);
+    Vec3 t = input->tangent;
+    Vec3 b = input->bitangent;
     Vec3 n = input->normal;
 
     normal = vec3_normalize(
@@ -1075,7 +1074,7 @@ i32 main() {
         .texture_emission        = &texture_emission,
         .texture_normal          = &texture_normal,
       },
-      .proc = pbr_shader_proc,
+      .proc = debug_shader_proc,
     };
 
     slice_iter_v(obj.triangles, t, i, {

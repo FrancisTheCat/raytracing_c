@@ -17,8 +17,6 @@
 #include "stdatomic.h"
 #include "immintrin.h"
 
-#define EPSILON 0.000001f
-
 #undef  IDX
 #define IDX(arr, i) (arr).data[(i)]
 
