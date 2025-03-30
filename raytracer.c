@@ -624,66 +624,49 @@ internal Vec3 sample_texture_nearest(Image *texture, Vec2 tex_coords) {
   );
 }
 
+internal f32 floor_f32(f32 x) {
+  return (isize)x;
+}
+
 internal Vec3 sample_texture_bilinear(Image *texture, Vec2 tex_coords) {
-  isize u = tex_coords.x * texture->width;
-  if (u >= texture->width) {
-    u = texture->width - 1;
-  }
-  isize v = (1 - tex_coords.y) * texture->height;
-  if (v >= texture->height) {
-    v = texture->height - 1;
-  }
+  // Convert normalized texture coordinates to pixel space
+  f32 px = tex_coords.x * (texture->width - 1);
+  f32 py = (1.0f - tex_coords.y) * (texture->height - 1);
 
-  isize u2 = u + 1;
-  if (u2 >= texture->width) {
-    u2 = texture->width - 1;
-  }
-  isize v2 = v + 1;
-  if (v2 >= texture->height) {
-    v2 = texture->height - 1;
-  }
+  // Compute integer pixel indices
+  isize u = (isize)floor_f32(px);
+  isize v = (isize)floor_f32(py);
 
-  f32 a = fract_f32(tex_coords.x * texture->width);
-  f32 b = fract_f32(tex_coords.y * texture->height);
+  // Compute fractional part
+  f32 a = px - u;
+  f32 b = py - v;
 
-  return vec3_add(
-    vec3_add(
-      vec3_scale(
-        vec3(
-          IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 0) / 255.0f,
-          IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 1) / 255.0f,
-          IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 2) / 255.0f,
-        ),
-        (1.0f - a) * (1.0f - b)
-      ),
-      vec3_scale(
-        vec3(
-          IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 0) / 255.0f,
-          IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 1) / 255.0f,
-          IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 2) / 255.0f,
-        ),
-        (1.0f - a) * b
-      )
-    ),
-    vec3_add(
-      vec3_scale(
-        vec3(
-          IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 0) / 255.0f,
-          IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 1) / 255.0f,
-          IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 2) / 255.0f,
-        ),
-        a * (1.0f - b)
-      ),
-      vec3_scale(
-        vec3(
-          IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 0) / 255.0f,
-          IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 1) / 255.0f,
-          IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 2) / 255.0f,
-        ),
-        a * b
-      )
-    )
-  );
+  // Ensure u2, v2 stay in bounds
+  isize u2 = (u + 1 < texture->width)  ? u + 1 : u;
+  isize v2 = (v + 1 < texture->height) ? v + 1 : v;
+
+  // Sample four surrounding texels
+  Vec3 c00 = vec3(
+      IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 0) / 255.0f,
+      IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 1) / 255.0f,
+      IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 2) / 255.0f);
+  Vec3 c10 = vec3(
+      IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 0) / 255.0f,
+      IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 1) / 255.0f,
+      IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 2) / 255.0f);
+  Vec3 c01 = vec3(
+      IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 0) / 255.0f,
+      IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 1) / 255.0f,
+      IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 2) / 255.0f);
+  Vec3 c11 = vec3(
+      IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 0) / 255.0f,
+      IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 1) / 255.0f,
+      IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 2) / 255.0f);
+
+  // Bilinear interpolation
+  Vec3 c0 = vec3_lerp(c00, c10, a);
+  Vec3 c1 = vec3_lerp(c01, c11, a);
+  return vec3_lerp(c0, c1, b);
 }
 
 typedef struct {
