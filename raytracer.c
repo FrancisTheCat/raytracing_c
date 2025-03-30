@@ -1,8 +1,8 @@
 #include "raytracer.h"
 
-#define WIDTH       (1024 * 2)
-#define HEIGHT      (1024 * 2)
-#define SAMPLES     (4)
+#define WIDTH       (1024)
+#define HEIGHT      (1024)
+#define SAMPLES     (128)
 #define MAX_BOUNCES 8
 #define USE_THREADS 1
 #define N_THREADS   16
@@ -1074,7 +1074,7 @@ i32 main() {
         .texture_emission        = &texture_emission,
         .texture_normal          = &texture_normal,
       },
-      .proc = debug_shader_proc,
+      .proc = pbr_shader_proc,
     };
 
     slice_iter_v(obj.triangles, t, i, {
