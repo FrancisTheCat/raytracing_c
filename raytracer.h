@@ -80,13 +80,14 @@ typedef struct {
 } Ray;
 
 typedef struct {
-  Vec3 direction, normal, tangent;
+  Vec3 direction, normal, tangent, bitangent, position;
   Vec2 tex_coords;
 } Shader_Input;
 
 typedef struct {
   Vec3   direction;
   Color3 tint, emission;
+  b8     terminate;
 } Shader_Output;
 
 typedef void (*Shader_Proc)(rawptr, Shader_Input const *, Shader_Output *);
@@ -98,7 +99,7 @@ typedef struct {
 
 typedef struct {
   f32         distance;
-  Vec3        normal, point, tangent;
+  Vec3        normal, point, tangent, bitangent;
   Vec2        tex_coords;
   Shader      shader;
   b8          back_face;

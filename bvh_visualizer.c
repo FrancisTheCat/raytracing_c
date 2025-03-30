@@ -1,15 +1,17 @@
 #include "codin/codin.h"
 #include "codin/os.h"
 
-#define Image    Raylib_Image
-#define Material Raylib_Material
-#define Ray      Raylib_Ray
+#define Image    rl_Image
+#define Material rl_Material
+#define Ray      rl_Ray
+#define Shader   rl_Shader
 
 #include "raylib.h"
 
 #undef Image
 #undef Ray
 #undef Material
+#undef Shader
 
 #include "bvh.c"
 

@@ -334,7 +334,14 @@ internal inline b8 ray_triangles_hit_8(
       d = 1.0f;
     }
 
-    hit->tangent = vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), 1.0f / d);
+    f32 inv_d = 1.0f / d;
+
+    Vec3 tangent = vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d);
+    Vec3 bitangent = vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d);
+    f32 tangent_w = (vec3_dot(vec3_cross(hit->normal, tangent), bitangent) < 0.0f) ? -1.0f : 1.0f;
+
+    hit->tangent   = tangent;
+    hit->bitangent = vec3_scale(bitangent, tangent_w);
 
     return true;
   }
@@ -694,14 +701,14 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
          v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
 
     Vec3 t = vec3_normalize(input->tangent);
-    Vec3 b = vec3_cross(input->normal, input->tangent);
+    Vec3 b = vec3_normalize(input->bitangent);
     Vec3 n = input->normal;
 
     normal = vec3_normalize(
       vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 2.0f,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 2.0f,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 2.0f,
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 0.5f,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 0.5f,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 0.5f,
       )
     );
   }
@@ -714,6 +721,33 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
   CASE PBR_Type_Diffuse:
     output->direction = vec3_normalize(vec3_add(rand_vec3(), normal));
   }
+}
+
+internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
+
+  Vec3 normal = input->normal;
+  if (data->texture_normal) {
+    Vec3 v = sample_texture(data->texture_normal, input->tex_coords);
+         v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
+
+    Vec3 t = vec3_normalize(input->tangent);
+    Vec3 b = vec3_normalize(input->bitangent);
+    Vec3 n = input->normal;
+
+    normal = vec3_normalize(
+      vec3(
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 0.5f,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 0.5f,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 0.5f,
+      )
+    );
+  }
+
+  // output->emission  = vec3_broadcast(normal.y * 0.5 + 0.5);
+  // output->emission  = vec3_broadcast(vec3_dot(normal, vec3(0, 1, 0)));
+  output->emission  = vec3_add(vec3_scale(normal, 0.5), vec3_broadcast(0.5f));
+  output->terminate = true;
 }
 
 Color3 cast_ray(BVH *bvh, Ray ray) {
@@ -734,6 +768,8 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
         .direction  = ray.direction,
         .normal     = hit.normal,
         .tangent    = hit.tangent,
+        .bitangent  = hit.bitangent,
+        .position   = hit.point,
         .tex_coords = hit.tex_coords,
       };
       Shader_Output shader_output = {0};
@@ -743,6 +779,10 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
       ray.direction    = shader_output.direction;
       emission         = vec3_add(emission, vec3_mul(shader_output.emission, accumulated_tint));
       accumulated_tint = vec3_mul(accumulated_tint, shader_output.tint);
+
+      if (shader_output.terminate) {
+        break;
+      }
     } else {
       return vec3_add(vec3_mul(sample_background(ray.direction), accumulated_tint), emission);
     }
