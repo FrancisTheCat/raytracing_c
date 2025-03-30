@@ -2,7 +2,7 @@
 
 #define WIDTH       (1024)
 #define HEIGHT      (1024)
-#define SAMPLES     (128)
+#define SAMPLES     (64)
 #define MAX_BOUNCES 8
 #define USE_THREADS 1
 #define N_THREADS   16
@@ -722,7 +722,7 @@ enum {
 
 typedef struct {
   Vec3   albedo, emission;
-  f32    roughness;
+  f32    roughness, normal_map_strength;
   u8     type;
   Image *texture_albedo;
   Image *texture_normal;
@@ -768,9 +768,9 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
 
     normal = vec3_normalize(
       vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 0.5f,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 0.5f,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 0.5f,
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 1.0 / data->normal_map_strength,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 1.0 / data->normal_map_strength,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 1.0 / data->normal_map_strength,
       )
     );
   }
@@ -799,9 +799,9 @@ internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_
 
     normal = vec3_normalize(
       vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 0.5f,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 0.5f,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 0.5f,
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 1.0 / data->normal_map_strength,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 1.0 / data->normal_map_strength,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 1.0 / data->normal_map_strength,
       )
     );
   }
@@ -819,9 +819,6 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
     Hit hit = { .distance = F32_INFINITY, };
     ray_bvh_hit(&ray, bvh, &hit);
     if (hit.distance != F32_INFINITY) {
-      hit.normal   = vec3_normalize(hit.normal);
-      ray.position = vec3_add(hit.point, vec3_scale(hit.normal, EPSILON));
-
       Shader_Input shader_input = {
         .direction  = ray.direction,
         .normal     = hit.normal,
@@ -837,6 +834,8 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
       ray.direction    = shader_output.direction;
       emission         = vec3_add(emission, vec3_mul(shader_output.emission, accumulated_tint));
       accumulated_tint = vec3_mul(accumulated_tint, shader_output.tint);
+
+      ray.position     = vec3_add(hit.point, vec3_scale(hit.normal, max(EPSILON, -0.02f * vec3_dot(ray.direction, hit.normal))));
 
       if (shader_output.terminate) {
         break;
@@ -1067,8 +1066,8 @@ i32 main() {
       .data = &(PBR_Shader_Data) {
         .albedo                  = vec3(1, 1, 1),
         .emission                = vec3(1, 1, 1),
-        .type                    = PBR_Type_Metal,
         .roughness               = 1.0f,
+        .normal_map_strength     = 1.0f,
         .texture_albedo          = &texture_albedo,
         .texture_metal_roughness = &texture_metal_roughness,
         .texture_emission        = &texture_emission,
