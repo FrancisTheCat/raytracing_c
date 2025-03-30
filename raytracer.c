@@ -2,7 +2,7 @@
 
 #define WIDTH       (1024)
 #define HEIGHT      (1024)
-#define SAMPLES     (16)
+#define SAMPLES     (128)
 #define MAX_BOUNCES 8
 #define USE_BVH     1
 #define USE_THREADS 1
@@ -15,6 +15,9 @@
 #define CHUNKS_X ((WIDTH  + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define CHUNKS_Y ((HEIGHT + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define N_CHUNKS (CHUNKS_X * CHUNKS_Y)
+
+// #define sample_texture sample_texture_nearest
+#define sample_texture sample_texture_bilinear
 
 internal thread_local u32 random_state = 0;
 
@@ -607,7 +610,7 @@ internal inline void ray_spheres_hit(Ray *ray, Spheres *spheres, Hit *hit) {
   }
 }
 
-internal Vec3 sample_texture(Image *texture, Vec2 tex_coords) {
+internal Vec3 sample_texture_nearest(Image *texture, Vec2 tex_coords) {
   isize u = tex_coords.x * texture->width;
   if (u >= texture->width) {
     u = texture->width - 1;
@@ -621,6 +624,68 @@ internal Vec3 sample_texture(Image *texture, Vec2 tex_coords) {
     IDX(texture->pixels, texture->components * (u + texture->width * v) + 0) / 255.0f,
     IDX(texture->pixels, texture->components * (u + texture->width * v) + 1) / 255.0f,
     IDX(texture->pixels, texture->components * (u + texture->width * v) + 2) / 255.0f,
+  );
+}
+
+internal Vec3 sample_texture_bilinear(Image *texture, Vec2 tex_coords) {
+  isize u = tex_coords.x * texture->width;
+  if (u >= texture->width) {
+    u = texture->width - 1;
+  }
+  isize v = (1 - tex_coords.y) * texture->height;
+  if (v >= texture->height) {
+    v = texture->height - 1;
+  }
+
+  isize u2 = u + 1;
+  if (u2 >= texture->width) {
+    u2 = texture->width - 1;
+  }
+  isize v2 = v + 1;
+  if (v2 >= texture->height) {
+    v2 = texture->height - 1;
+  }
+
+  f32 a = fract_f32(tex_coords.x * texture->width);
+  f32 b = fract_f32(tex_coords.y * texture->height);
+
+  return vec3_add(
+    vec3_add(
+      vec3_scale(
+        vec3(
+          IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 0) / 255.0f,
+          IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 1) / 255.0f,
+          IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 2) / 255.0f,
+        ),
+        (1.0f - a) * (1.0f - b)
+      ),
+      vec3_scale(
+        vec3(
+          IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 0) / 255.0f,
+          IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 1) / 255.0f,
+          IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 2) / 255.0f,
+        ),
+        (1.0f - a) * b
+      )
+    ),
+    vec3_add(
+      vec3_scale(
+        vec3(
+          IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 0) / 255.0f,
+          IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 1) / 255.0f,
+          IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 2) / 255.0f,
+        ),
+        a * (1.0f - b)
+      ),
+      vec3_scale(
+        vec3(
+          IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 0) / 255.0f,
+          IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 1) / 255.0f,
+          IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 2) / 255.0f,
+        ),
+        a * b
+      )
+    )
   );
 }
 
