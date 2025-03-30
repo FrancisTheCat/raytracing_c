@@ -2,7 +2,7 @@
 
 #define WIDTH       (1024)
 #define HEIGHT      (1024)
-#define SAMPLES     (64)
+#define SAMPLES     (128)
 #define MAX_BOUNCES 8
 #define USE_BVH     1
 #define USE_THREADS 1
@@ -625,19 +625,10 @@ Color3 cast_ray(Ray ray) {
       ray_triangles_hit(&ray, &scene_triangles, &hit);
     #endif
     if (hit.distance != F32_INFINITY) {
-      // if (vec3_dot(hit.normal, ray.direction) > 0) {
-      //   hit.normal = vec3_scale(hit.normal, -1);
-      // }
-
       hit.normal   = vec3_normalize(hit.normal);
       ray.position = vec3_add(hit.point, vec3_scale(hit.normal, EPSILON));
 
       Material material = IDX(materials, hit.material);
-
-      // return vec3_broadcast(hit.distance * 0.25);
-      // return vec3_add(vec3_scale(hit.normal, 0.5), vec3(0.5, 0.5, 0.5));
-      // return vec3_add(vec3_scale(vec3_normalize(hit.tangent), 0.5), vec3(0.5, 0.5, 0.5));
-      // return vec3(hit.tex_coords.x, hit.tex_coords.y, 0);
 
       if (material.texture_albedo) {
         material.albedo = vec3_mul(material.albedo, sample_texture(material.texture_albedo, hit.tex_coords));
@@ -684,8 +675,6 @@ Color3 cast_ray(Ray ray) {
       CASE Material_Type_Diffuse:
         ray.direction = vec3_normalize(vec3_add(rand_vec3(), hit.normal));
       }
-
-      // return vec3_add(vec3_scale(ray.direction, 0.5), vec3(0.5, 0.5, 0.5));
 
       accumulated_tint = vec3_mul(accumulated_tint, material.albedo);
     } else {
@@ -829,6 +818,18 @@ void render_thread_proc(rawptr _arg) {
   }
 }
 
+internal void load_texture(String path, Image *texture) {
+  b8 ok = png_load_bytes(
+    unwrap_err(read_entire_file_path(path, context.allocator)),
+    texture,
+    context.allocator
+  );
+  if (!ok) {
+    fmt_eprintflnc("Failed to load texture: '%S'", path);
+    process_exit(1);
+  }
+}
+
 i32 main() {
   context.logger = (Logger) {0};
 
@@ -845,55 +846,12 @@ i32 main() {
   Image texture_emission        = {0};
   Image texture_normal          = {0};
 
-  b8 bg_image_ok = png_load_bytes(
-    unwrap_err(
-      read_entire_file_path(LIT("background.png"),
-      context.allocator)
-    ),
-    &background_image,
-    context.allocator
-  );
-  assert(bg_image_ok);
+  load_texture(LIT("background.png"), &background_image);
 
-  b8 tex_image_ok = png_load_bytes(
-    unwrap_err(
-      read_entire_file_path(LIT("helmet_albedo.png"),
-      context.allocator)
-    ),
-    &texture_albedo,
-    context.allocator
-  );
-  assert(tex_image_ok);
-
-  tex_image_ok = png_load_bytes(
-    unwrap_err(
-      read_entire_file_path(LIT("helmet_mr.png"),
-      context.allocator)
-    ),
-    &texture_metal_roughness,
-    context.allocator
-  );
-  assert(tex_image_ok);
-
-  tex_image_ok = png_load_bytes(
-    unwrap_err(
-      read_entire_file_path(LIT("helmet_emission.png"),
-      context.allocator)
-    ),
-    &texture_emission,
-    context.allocator
-  );
-  assert(tex_image_ok);
-
-  tex_image_ok = png_load_bytes(
-    unwrap_err(
-      read_entire_file_path(LIT("helmet_normal.png"),
-      context.allocator)
-    ),
-    &texture_normal,
-    context.allocator
-  );
-  assert(tex_image_ok);
+  load_texture(LIT("helmet_albedo.png"),   &texture_albedo);
+  load_texture(LIT("helmet_normal.png"),   &texture_normal);
+  load_texture(LIT("helmet_emission.png"), &texture_emission);
+  load_texture(LIT("helmet_mr.png"),       &texture_metal_roughness);
 
   f32 angle    = PI * 0.125f;
   f32 distance = 2;
