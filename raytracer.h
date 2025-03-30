@@ -124,7 +124,8 @@ typedef struct {
 typedef Slice(Triangle) Triangle_Slice;
 
 typedef struct {
-  Vec3   normal_a,     normal_b,     normal_c;
+  Vec3   normal_a, normal_b, normal_c;
+  Vec3   tangent, bitangent;
   Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
   Shader shader;
 } Triangle_AOS;

@@ -4,7 +4,6 @@
 #define HEIGHT      (1024)
 #define SAMPLES     (128)
 #define MAX_BOUNCES 8
-#define USE_BVH     1
 #define USE_THREADS 1
 #define N_THREADS   16
 
@@ -16,8 +15,8 @@
 #define CHUNKS_Y ((HEIGHT + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define N_CHUNKS (CHUNKS_X * CHUNKS_Y)
 
-// #define sample_texture sample_texture_nearest
-#define sample_texture sample_texture_bilinear
+#define sample_texture sample_texture_nearest
+// #define sample_texture sample_texture_bilinear
 
 internal thread_local u32 random_state = 0;
 
@@ -192,6 +191,25 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
     triangles->c_y[triangles->len + i] = t.c.y;
     triangles->c_z[triangles->len + i] = t.c.z;
 
+    Vec3 edge1 = vec3_sub(vec3(t.b.x, t.b.y, t.b.z), vec3(t.a.x, t.a.y, t.a.z));
+    Vec3 edge2 = vec3_sub(vec3(t.c.x, t.c.y, t.c.z), vec3(t.a.x, t.a.y, t.a.z));
+
+    Vec2 delta_uv1 = vec2_sub(t.tex_coords_b, t.tex_coords_a);
+    Vec2 delta_uv2 = vec2_sub(t.tex_coords_c, t.tex_coords_a);
+
+    f32 d = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
+    if (abs_f32(d) < EPSILON) {
+      d = 1.0f;
+    }
+
+    f32 inv_d = 1.0f / d;
+
+    Vec3 normal    = vec3_normalize(vec3_cross(edge2, edge1));
+    Vec3 tangent   = vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d);
+    Vec3 bitangent = vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d);
+    f32  tangent_w = (vec3_dot(vec3_cross(normal, tangent), bitangent) < 0.0f) ? -1.0f : 1.0f;
+    bitangent      = vec3_scale(bitangent, tangent_w);
+
     triangles->aos[triangles->len + i] = (Triangle_AOS) {
       .shader       = t.shader,
       .normal_a     = t.normal_a,
@@ -200,6 +218,8 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
       .tex_coords_a = t.tex_coords_a,
       .tex_coords_b = t.tex_coords_b,
       .tex_coords_c = t.tex_coords_c,
+      .tangent      = tangent,
+      .bitangent    = bitangent,
     };
   });
   triangles->len += v.len;
@@ -326,25 +346,8 @@ internal inline b8 ray_triangles_hit_8(
     );
     hit->shader     = triangles->aos[t].shader;
 
-    Vec3 edge1 = vec3_sub(vec3(triangles->b_x[t], triangles->b_y[t], triangles->b_z[t]), vec3(triangles->a_x[t], triangles->a_y[t], triangles->a_z[t]));
-    Vec3 edge2 = vec3_sub(vec3(triangles->c_x[t], triangles->c_y[t], triangles->c_z[t]), vec3(triangles->a_x[t], triangles->a_y[t], triangles->a_z[t]));
-
-    Vec2 delta_uv1 = vec2_sub(triangles->aos[t].tex_coords_b, triangles->aos[t].tex_coords_a);
-    Vec2 delta_uv2 = vec2_sub(triangles->aos[t].tex_coords_c, triangles->aos[t].tex_coords_a);
-
-    f32 d = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
-    if (abs_f32(d) < EPSILON) {
-      d = 1.0f;
-    }
-
-    f32 inv_d = 1.0f / d;
-
-    Vec3 tangent = vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d);
-    Vec3 bitangent = vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d);
-    f32 tangent_w = (vec3_dot(vec3_cross(hit->normal, tangent), bitangent) < 0.0f) ? -1.0f : 1.0f;
-
-    hit->tangent   = tangent;
-    hit->bitangent = vec3_scale(bitangent, tangent_w);
+    hit->tangent    = triangles->aos[t].tangent;
+    hit->bitangent  = triangles->aos[t].bitangent;
 
     return true;
   }
@@ -454,112 +457,107 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
   );
 }
 
-#if USE_BVH
-  #include "bvh.c"
+#include "bvh.c"
 
-  internal void ray_bvh_node_hit(Ray *ray, BVH *bvh, BVH_Node *node, Hit *hit, i32 depth) {
-    u8 aabb_hits = ray_aabbs_hit_8(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
-    u8 mask      = 1;
+internal void ray_bvh_node_hit(Ray *ray, BVH *bvh, BVH_Node *node, Hit *hit, i32 depth) {
+  u8 aabb_hits = ray_aabbs_hit_8(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
+  u8 mask      = 1;
 
-    for_range(offset, 0, 8) {
-      if (aabb_hits & mask) {
-        BVH_Index idx = node->children[offset];
-        if (idx.leaf) {
-          ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit);
-        } else {
-          ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, idx.index), hit, depth + 1);
-        }
+  for_range(offset, 0, 8) {
+    if (aabb_hits & mask) {
+      BVH_Index idx = node->children[offset];
+      if (idx.leaf) {
+        ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit);
+      } else {
+        ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, idx.index), hit, depth + 1);
       }
-      mask <<= 1;
     }
+    mask <<= 1;
+  }
+}
+
+internal void ray_bvh_hit(Ray *ray, BVH *bvh, Hit *hit) {
+  if (bvh->root.leaf) {
+    ray_triangles_hit_8(ray, &bvh->triangles, bvh->root.index, hit);
+  } else {
+    ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, bvh->root.index), hit, 1);
+  }
+}
+
+internal BVH_Index bvh_build(BVH *bvh, Triangle_Slice triangles) {
+  if (triangles.len <= 8) {
+    BVH_Index idx = { .index = bvh->triangles.len, .leaf = true, };
+    triangles_append(&bvh->triangles, triangles);
+    while (bvh->triangles.len % 8) {
+      bvh->triangles.len += 1;
+    }
+    assert(bvh->triangles.len <= bvh->triangles.cap);
+    return idx;
   }
 
-  internal void ray_bvh_hit(Ray *ray, BVH *bvh, Hit *hit) {
-    if (bvh->root.leaf) {
-      ray_triangles_hit_8(ray, &bvh->triangles, bvh->root.index, hit);
-    } else {
-      ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, bvh->root.index), hit, 1);
-    }
-  }
+  Triangle_Slice slices[8] = { triangles, };
+  isize n_slices = 1;
 
-  internal BVH_Index bvh_build(BVH *bvh, Triangle_Slice triangles) {
-    if (triangles.len <= 8) {
-      BVH_Index idx = { .index = bvh->triangles.len, .leaf = true, };
-      triangles_append(&bvh->triangles, triangles);
-      while (bvh->triangles.len % 8) {
-        bvh->triangles.len += 1;
-      }
-      assert(bvh->triangles.len <= bvh->triangles.cap);
-      return idx;
-    }
-
-    Triangle_Slice slices[8] = { triangles, };
-    isize n_slices = 1;
-
-    while (n_slices < 8) {
-      isize _n_slices = n_slices;
-      for_range(slice_i, 0, _n_slices) {
-        Triangle_Slice slice = slices[slice_i];
-        if (slice.len <= 8) {
-          n_slices += 1;
-          continue;
-        }
-        f32 min_surface_area = F32_INFINITY;
-        i32 best_axis;
-        for_range(axis, 0, 3) {
-          sort_triangle_slice(slice, axis);
-          AABB a, b;
-          aabb_triangle_slice(slice_end(slice,   slice.len / 2), &a);
-          aabb_triangle_slice(slice_start(slice, slice.len / 2), &b);
-          f32 surface_area = aabb_surface_area(&a) + aabb_surface_area(&b);
-          if (surface_area <= min_surface_area) {
-            min_surface_area = surface_area;
-            best_axis        = axis;
-          }
-        }
-
-        if (best_axis != 2) {
-          sort_triangle_slice(slice, best_axis);
-        }
-
-        slices[slice_i ] = slice_end(slice,   slice.len / 2);
-        slices[n_slices] = slice_start(slice, slice.len / 2);
+  while (n_slices < 8) {
+    isize _n_slices = n_slices;
+    for_range(slice_i, 0, _n_slices) {
+      Triangle_Slice slice = slices[slice_i];
+      if (slice.len <= 8) {
         n_slices += 1;
+        continue;
       }
+      f32 min_surface_area = F32_INFINITY;
+      i32 best_axis;
+      for_range(axis, 0, 3) {
+        sort_triangle_slice(slice, axis);
+        AABB a, b;
+        aabb_triangle_slice(slice_end(slice,   slice.len / 2), &a);
+        aabb_triangle_slice(slice_start(slice, slice.len / 2), &b);
+        f32 surface_area = aabb_surface_area(&a) + aabb_surface_area(&b);
+        if (surface_area <= min_surface_area) {
+          min_surface_area = surface_area;
+          best_axis        = axis;
+        }
+      }
+
+      if (best_axis != 2) {
+        sort_triangle_slice(slice, best_axis);
+      }
+
+      slices[slice_i ] = slice_end(slice,   slice.len / 2);
+      slices[n_slices] = slice_start(slice, slice.len / 2);
+      n_slices += 1;
     }
-  
-    BVH_Node node = {0};
-    BVH_Index index = (BVH_Index) { .index = bvh->nodes.len, .leaf = false, };
-    vector_append(&bvh->nodes, node);
-
-    slice_iter_v(slice_array(Slice(Triangle_Slice), slices), tris, i, {
-      AABB aabb;
-      aabb_triangle_slice(tris, &aabb);
-
-      node.mins.x[i] = aabb.min.x;
-      node.mins.y[i] = aabb.min.y;
-      node.mins.z[i] = aabb.min.z;
-
-      node.maxs.x[i] = aabb.max.x;
-      node.maxs.y[i] = aabb.max.y;
-      node.maxs.z[i] = aabb.max.z;
-
-      node.children[i] = bvh_build(bvh, tris);
-    });
-
-    IDX(bvh->nodes, index.index) = node;
-    return index;
   }
 
-  internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocator) {
-    vector_init(&bvh->nodes, 0, 8, allocator);
-    triangles_init(&bvh->triangles, 0, src_triangles.len * 8, allocator);
-    bvh->root = bvh_build(bvh, src_triangles);
-  }
+  BVH_Node node = {0};
+  BVH_Index index = (BVH_Index) { .index = bvh->nodes.len, .leaf = false, };
+  vector_append(&bvh->nodes, node);
 
-#else
-  Triangles scene_triangles;
-#endif
+  slice_iter_v(slice_array(Slice(Triangle_Slice), slices), tris, i, {
+    AABB aabb;
+    aabb_triangle_slice(tris, &aabb);
+
+    node.mins.x[i] = aabb.min.x;
+    node.mins.y[i] = aabb.min.y;
+    node.mins.z[i] = aabb.min.z;
+
+    node.maxs.x[i] = aabb.max.x;
+    node.maxs.y[i] = aabb.max.y;
+    node.maxs.z[i] = aabb.max.z;
+
+    node.children[i] = bvh_build(bvh, tris);
+  });
+
+  IDX(bvh->nodes, index.index) = node;
+  return index;
+}
+
+internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocator) {
+  vector_init(&bvh->nodes, 0, 8, allocator);
+  triangles_init(&bvh->triangles, 0, src_triangles.len * 8, allocator);
+  bvh->root = bvh_build(bvh, src_triangles);
+}
 
 Image background_image = {0};
 
@@ -820,11 +818,7 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
   Color3 emission         = {0};
   for_range(i, 0, MAX_BOUNCES) {
     Hit hit = { .distance = F32_INFINITY, };
-    #if USE_BVH
-      ray_bvh_hit(&ray, bvh, &hit);
-    #else
-      ray_triangles_hit(&ray, &scene_triangles, &hit);
-    #endif
+    ray_bvh_hit(&ray, bvh, &hit);
     if (hit.distance != F32_INFINITY) {
       hit.normal   = vec3_normalize(hit.normal);
       ray.position = vec3_add(hit.point, vec3_scale(hit.normal, EPSILON));
@@ -1098,18 +1092,14 @@ i32 main() {
         .shader       = shader,
       };
     });
-    #if USE_BVH
-      Timestamp bvh_start_time = time_now();
-      bvh_init(&bvh, triangles, context.allocator);
-      fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
 
-      Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Truncate | FP_Write | FP_Create));
-      Writer bvh_out = writer_from_handle(bvh_file);
-      bvh_save_writer(&bvh_out, &bvh);
-    #else
-      triangles_init(&scene_triangles, 0, triangles.len, context.allocator);
-      triangles_append(&scene_triangles, triangles);
-    #endif
+    Timestamp bvh_start_time = time_now();
+    bvh_init(&bvh, triangles, context.allocator);
+    fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
+
+    Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Truncate | FP_Write | FP_Create));
+    Writer bvh_out = writer_from_handle(bvh_file);
+    bvh_save_writer(&bvh_out, &bvh);
 
     n_triangles = triangles.len;
   #endif
@@ -1121,9 +1111,7 @@ i32 main() {
   if (USE_THREADS) {
     fmt_printflnc("Threads:   %d", N_THREADS);
   }
-#if USE_BVH
-    fmt_printflnc("BVH-Nodes: %d", bvh.nodes.len);
-#endif
+  fmt_printflnc("BVH-Nodes: %d", bvh.nodes.len);
   fmt_printflnc("Triangles: %d", n_triangles);
 
   fmt_printlnc("");
