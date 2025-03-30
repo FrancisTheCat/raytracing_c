@@ -2,13 +2,19 @@
 
 #define WIDTH       (1024)
 #define HEIGHT      (1024)
-#define SAMPLES     (32)
+#define SAMPLES     (16)
 #define MAX_BOUNCES 8
 #define USE_BVH     1
 #define USE_THREADS 1
 #define N_THREADS   16
 
 #define USE_CACHED_BVH 0
+
+#define CHUNK_SIZE 32
+
+#define CHUNKS_X ((WIDTH  + CHUNK_SIZE - 1) / CHUNK_SIZE)
+#define CHUNKS_Y ((HEIGHT + CHUNK_SIZE - 1) / CHUNK_SIZE)
+#define N_CHUNKS (CHUNKS_X * CHUNKS_Y)
 
 internal thread_local u32 random_state = 0;
 
@@ -541,7 +547,6 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
     bvh->root = bvh_build(bvh, src_triangles);
   }
 
-  BVH       bvh;
 #else
   Triangles scene_triangles;
 #endif
@@ -711,13 +716,13 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
   }
 }
 
-Color3 cast_ray(Ray ray) {
+Color3 cast_ray(BVH *bvh, Ray ray) {
   Color3 accumulated_tint = vec3(1, 1, 1);
   Color3 emission         = {0};
   for_range(i, 0, MAX_BOUNCES) {
     Hit hit = { .distance = F32_INFINITY, };
     #if USE_BVH
-      ray_bvh_hit(&ray, &bvh, &hit);
+      ray_bvh_hit(&ray, bvh, &hit);
     #else
       ray_triangles_hit(&ray, &scene_triangles, &hit);
     #endif
@@ -768,113 +773,127 @@ internal inline f32x8 hash12x8(Vec2x8 p) {
   return fract_f32x8((p3.x + p3.y + dot * 2.0f) * (p3.z + dot));
 }
 
-_Atomic i32 n_done = 0;
-_Atomic i32 cursor = 0;
-Image image = {0};
+typedef struct {
+  Matrix_3x3 matrix;
+  Vec3       position;
+  f32        fov, focal_length;
+} Camera;
 
-Matrix_3x3 camera_matrix       = {0};
-Vec3       camera_position     = {0};
-f32        camera_fov          = {0};
-f32        camera_focal_length = {0};
+typedef struct {
+  Camera      camera;
+  Image       image;
+  BVH        *bvh;
+  _Atomic i32 threads_done, current_chunk;
+} Rendering_Context;
 
-void render_thread_proc(rawptr _arg) {
-  (void)_arg;
+void render_thread_proc(rawptr arg) {
+  Rendering_Context *ctx = (Rendering_Context *)arg;
+
+  Camera camera = ctx->camera;
 
   loop {
-    isize c = atomic_fetch_add(&cursor, 64);
-    if (c >= WIDTH * HEIGHT) {
-      atomic_fetch_add(&n_done, 1);
+    isize c = atomic_fetch_add(&ctx->current_chunk, 1);
+    if (c >= N_CHUNKS) {
+      atomic_fetch_add(&ctx->threads_done, 1);
       return;
     }
 
-    for_range(i, 0, 64) {
-      isize x = c % WIDTH;
-      isize y = c / WIDTH;
+    isize start_x = (c % CHUNKS_X) * CHUNK_SIZE;
+    isize start_y = (c / CHUNKS_X) * CHUNK_SIZE;
 
-      Color3 color = vec3(0, 0, 0);
-
-      f32x8 sample_indices = { 0, 1, 2, 3, 4, 5, 6, 7, };
-
-      for_range(sample_batch, 0, (SAMPLES + 7) / 8) {
-        f32x8 rand_a = hash12x8((Vec2x8) {
-          .x = _mm256_set1_ps((f32)x * 50.0f) + sample_indices,
-          .y = _mm256_set1_ps((f32)y),
-        });
-        f32x8 rand_b = hash12x8((Vec2x8) {
-          .x = _mm256_set1_ps((f32)x * 50.0f) + sample_indices,
-          .y = _mm256_set1_ps((f32)y),
-        });
-
-        Vec2x8 uvs = {
-          .x = ((f32)x + rand_a - 0.5) / WIDTH  - 0.5,
-          .y = ((f32)y + rand_b - 0.5) / HEIGHT - 0.5,
-        };
-        Vec3x8 directions = {
-          .x =  uvs.x * ((f32)WIDTH / HEIGHT),
-          .y = -uvs.y,
-          .z = _mm256_set1_ps(-camera_focal_length),
-        };
-
-        f32x8 inv_lengths = _mm256_rsqrt_ps(
-          directions.x * directions.x +
-          directions.y * directions.y +
-          directions.z * directions.z
-        );
-
-        directions = (Vec3x8) {
-          .x = camera_matrix.rows[0][0] * directions.x + camera_matrix.rows[0][1] * directions.y + camera_matrix.rows[0][2] * directions.z,
-          .y = camera_matrix.rows[1][0] * directions.x + camera_matrix.rows[1][1] * directions.y + camera_matrix.rows[1][2] * directions.z,
-          .z = camera_matrix.rows[2][0] * directions.x + camera_matrix.rows[2][1] * directions.y + camera_matrix.rows[2][2] * directions.z,
-        };
-
-        directions.x *= inv_lengths;
-        directions.y *= inv_lengths;
-        directions.z *= inv_lengths;
-
-        f32 directions_x[8] __attribute__((aligned(32)));
-        f32 directions_y[8] __attribute__((aligned(32)));
-        f32 directions_z[8] __attribute__((aligned(32)));
-
-        _mm256_store_ps(directions_x, directions.x);
-        _mm256_store_ps(directions_y, directions.y);
-        _mm256_store_ps(directions_z, directions.z);
-
-        for_range(sample, 0, 8) {
-          if (sample + sample_batch * 8 >= SAMPLES) {
-            break;
-          }
-          Ray r = {
-            .position  = camera_position,
-            .direction = vec3(directions_x[sample], directions_y[sample], directions_z[sample]),
-          };
-          color = vec3_add(color, cast_ray(r));
-        }
-        sample_indices += _mm256_set1_ps(8);
+    for_range(y, start_y, start_y + CHUNK_SIZE) {
+      if (y >= HEIGHT) {
+        break;
       }
 
-      color = vec3_scale(color, 1.0f / SAMPLES);
-      // color = vec3(
-      //   aces_f32(color.r),
-      //   aces_f32(color.g),
-      //   aces_f32(color.b),
-      // );
-      color = vec3(
-        clamp(color.r, 0, 1),
-        clamp(color.g, 0, 1),
-        clamp(color.b, 0, 1),
-      );
-      // color = vec3(
-      //   pow_f32(color.r, 1.0f / 2.2f),
-      //   pow_f32(color.g, 1.0f / 2.2f),
-      //   pow_f32(color.b, 1.0f / 2.2f),
-      // );
-      color = vec3_scale(color, 255.999f);
+      for_range(x, start_x, start_x + CHUNK_SIZE) {
+        if (x >= WIDTH) {
+          break;
+        }
 
-      IDX(image.pixels, 3 * (x + y * WIDTH) + 0) = (u8)color.data[0];
-      IDX(image.pixels, 3 * (x + y * WIDTH) + 1) = (u8)color.data[1];
-      IDX(image.pixels, 3 * (x + y * WIDTH) + 2) = (u8)color.data[2];
+        Color3 color = vec3(0, 0, 0);
 
-      c += 1;
+        f32x8 sample_indices = { 0, 1, 2, 3, 4, 5, 6, 7, };
+
+        for_range(sample_batch, 0, (SAMPLES + 7) / 8) {
+          f32x8 rand_a = hash12x8((Vec2x8) {
+            .x = _mm256_set1_ps((f32)x * 50.0f) + sample_indices,
+            .y = _mm256_set1_ps((f32)y),
+          });
+          f32x8 rand_b = hash12x8((Vec2x8) {
+            .x = _mm256_set1_ps((f32)x * 50.0f) + sample_indices,
+            .y = _mm256_set1_ps((f32)y),
+          });
+
+          Vec2x8 uvs = {
+            .x = ((f32)x + rand_a - 0.5) / WIDTH  - 0.5,
+            .y = ((f32)y + rand_b - 0.5) / HEIGHT - 0.5,
+          };
+          Vec3x8 directions = {
+            .x =  uvs.x * ((f32)WIDTH / HEIGHT),
+            .y = -uvs.y,
+            .z = _mm256_set1_ps(-camera.focal_length),
+          };
+
+          f32x8 inv_lengths = _mm256_rsqrt_ps(
+            directions.x * directions.x +
+            directions.y * directions.y +
+            directions.z * directions.z
+          );
+
+          directions = (Vec3x8) {
+            .x = camera.matrix.rows[0][0] * directions.x + camera.matrix.rows[0][1] * directions.y + camera.matrix.rows[0][2] * directions.z,
+            .y = camera.matrix.rows[1][0] * directions.x + camera.matrix.rows[1][1] * directions.y + camera.matrix.rows[1][2] * directions.z,
+            .z = camera.matrix.rows[2][0] * directions.x + camera.matrix.rows[2][1] * directions.y + camera.matrix.rows[2][2] * directions.z,
+          };
+
+          directions.x *= inv_lengths;
+          directions.y *= inv_lengths;
+          directions.z *= inv_lengths;
+
+          f32 directions_x[8] __attribute__((aligned(32)));
+          f32 directions_y[8] __attribute__((aligned(32)));
+          f32 directions_z[8] __attribute__((aligned(32)));
+
+          _mm256_store_ps(directions_x, directions.x);
+          _mm256_store_ps(directions_y, directions.y);
+          _mm256_store_ps(directions_z, directions.z);
+
+          for_range(sample, 0, 8) {
+            if (sample + sample_batch * 8 >= SAMPLES) {
+              break;
+            }
+            Ray r = {
+              .position  = camera.position,
+              .direction = vec3(directions_x[sample], directions_y[sample], directions_z[sample]),
+            };
+            color = vec3_add(color, cast_ray(ctx->bvh, r));
+          }
+          sample_indices += _mm256_set1_ps(8);
+        }
+
+        color = vec3_scale(color, 1.0f / SAMPLES);
+        // color = vec3(
+        //   aces_f32(color.r),
+        //   aces_f32(color.g),
+        //   aces_f32(color.b),
+        // );
+        color = vec3(
+          clamp(color.r, 0, 1),
+          clamp(color.g, 0, 1),
+          clamp(color.b, 0, 1),
+        );
+        // color = vec3(
+        //   pow_f32(color.r, 1.0f / 2.2f),
+        //   pow_f32(color.g, 1.0f / 2.2f),
+        //   pow_f32(color.b, 1.0f / 2.2f),
+        // );
+        color = vec3_scale(color, 255.999f);
+
+        IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 0) = (u8)color.data[0];
+        IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 1) = (u8)color.data[1];
+        IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 2) = (u8)color.data[2];
+      }
     }
   }
 }
@@ -894,7 +913,7 @@ internal void load_texture(String path, Image *texture) {
 i32 main() {
   context.logger = (Logger) {0};
 
-  image = (Image) {
+  Image image = {
     .components = 3,
     .pixel_type = PT_u8,
     .width      = WIDTH,
@@ -917,12 +936,15 @@ i32 main() {
   f32 angle    = PI * 0.125f;
   f32 distance = 2;
 
-  camera_position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
-  camera_matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
-  camera_fov          = PI / 2.0f;
-  camera_focal_length = 0.5f / atan_f32(camera_fov * 0.5f);
+  Camera camera;
+  camera.position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
+  camera.matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
+  camera.fov          = PI / 2.0f;
+  camera.focal_length = 0.5f / atan_f32(camera.fov * 0.5f);
 
   isize n_triangles = 0;
+
+  BVH bvh;
 
   #if USE_CACHED_BVH
     Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Read));
@@ -1003,15 +1025,21 @@ i32 main() {
 
   Timestamp start_time = time_now();
 
+  Rendering_Context rendering_context = {
+    .bvh    = &bvh,
+    .camera = camera,
+    .image  = image,
+  };
+
   #if USE_THREADS
     for_range(i, 0, N_THREADS) {
-      thread_create(render_thread_proc, nil, THREAD_STACK_DEFAULT, THREAD_TLS_DEFAULT);
+      thread_create(render_thread_proc, &rendering_context, THREAD_STACK_DEFAULT, THREAD_TLS_DEFAULT);
     }
 
-    while (n_done < N_THREADS) {
-      isize c = cursor;
+    while (rendering_context.threads_done < N_THREADS) {
+      isize  c   = rendering_context.current_chunk;
       String bar = LIT("====================");
-      f32 p = c / (f32)(WIDTH * HEIGHT);
+      f32    p   = c / (f32)((i32)N_CHUNKS);
       if (p > 1.0f) {
         p = 1.0f;
       }
