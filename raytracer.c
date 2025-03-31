@@ -652,7 +652,7 @@ Vec3 sample_background(Vec3 dir) {
   f32 invTwoPi = 1.0f / (2.0f * PI);
 
   f32 u = 0.5f + atan2_f32(dir.x, dir.z) * invTwoPi;
-  f32 v = 0.5f - asin_f32(dir.y) * invPi;
+  f32 v = 0.5f - asin_f32(-dir.y) * invPi;
 
   Vec3 color = sample_texture(&background_image, vec2(u, v));
   return srgb_to_linear(color);
