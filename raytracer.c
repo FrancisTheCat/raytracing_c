@@ -1,24 +1,22 @@
 #include "raytracer.h"
 
-#define WIDTH       (1024)
-#define HEIGHT      (1024)
-#define SAMPLES     (64)
-#define MAX_BOUNCES 8
-#define USE_THREADS 1
-#define N_THREADS   16
-
+#define WIDTH          2048
+#define HEIGHT         2048
+#define SAMPLES        256
+#define MAX_BOUNCES    8
+#define USE_THREADS    1
+#define N_THREADS      16
 #define USE_CACHED_BVH 0
-
-#define CHUNK_SIZE 32
+#define CHUNK_SIZE     32
 
 #define CHUNKS_X ((WIDTH  + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define CHUNKS_Y ((HEIGHT + CHUNK_SIZE - 1) / CHUNK_SIZE)
 #define N_CHUNKS (CHUNKS_X * CHUNKS_Y)
 
-#define EPSILON 0.000001f
+#define EPSILON 0.0001f
 
-#define sample_texture sample_texture_nearest
-// #define sample_texture sample_texture_bilinear
+// #define sample_texture sample_texture_nearest
+#define sample_texture sample_texture_bilinear
 
 internal thread_local u32 random_state = 0;
 
@@ -45,7 +43,7 @@ Vec3 rand_vec3() {
       rand_f32_range(-1, 1),
     );
     f32 lensq = vec3_length2(p);
-    if (1e-40f < lensq && lensq <= 1) {
+    if (EPSILON < lensq && lensq <= 1) {
       return vec3_scale(p, 1.0 / sqrt_f32(lensq));
     }
   }
@@ -211,6 +209,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
 
     triangles->aos[triangles->len + i] = (Triangle_AOS) {
       .shader       = t.shader,
+      .normal       = vec3_normalize(vec3_cross(edge1, edge2)),
       .normal_a     = t.normal_a,
       .normal_b     = t.normal_b,
       .normal_c     = t.normal_c,
@@ -296,33 +295,27 @@ internal inline b8 ray_triangles_hit_8(
   f32x8 v = inv_det * vec3x8_dot(ray_dir, s_cross_e1);
   f32x8 t = inv_det * vec3x8_dot(edge2,   s_cross_e1);
 
-  // (det > -epsilon && det < epsilon)
-  f32x8 miss_mask_1 = _mm256_and_ps(
-    _mm256_cmp_ps(det, nepsilon, _CMP_GT_OQ),
-    _mm256_cmp_ps(det,  epsilon, _CMP_LT_OQ)
-  );
-
   // (u < -epsilon || u > 1 + epsilon)
-  f32x8 miss_mask_2 = _mm256_or_ps(
+  f32x8 miss_mask_1 = _mm256_or_ps(
     _mm256_cmp_ps(u, nepsilon, _CMP_LT_OQ),
     _mm256_cmp_ps(u, _mm256_set1_ps(1 + EPSILON), _CMP_GT_OQ)
   );
 
   // (v < -epsilon || u + v > 1 + epsilon)
-  f32x8 miss_mask_3 = _mm256_or_ps(
+  f32x8 miss_mask_2 = _mm256_or_ps(
     _mm256_cmp_ps(v, nepsilon, _CMP_LT_OQ),
     _mm256_cmp_ps(u + v, _mm256_set1_ps(1 + EPSILON), _CMP_GT_OQ)
   );
 
-  f32x8 miss_mask_4 = _mm256_cmp_ps(t, epsilon, _CMP_LT_OQ);
+  f32x8 miss_mask_3 = _mm256_cmp_ps(t, epsilon, _CMP_LT_OQ);
 
   f32x8 miss_mask =
-    _mm256_or_ps(_mm256_or_ps(miss_mask_1, miss_mask_2), _mm256_or_ps(miss_mask_3, miss_mask_4));
+    _mm256_or_ps(miss_mask_1, _mm256_or_ps(miss_mask_2, miss_mask_3));
 
   f32x8 distances = _mm256_blendv_ps(t, _mm256_set1_ps(F32_INFINITY), miss_mask);
 
   i32 triangle_index;
-  f32 min = min_f32x8(distances, EPSILON, &triangle_index);
+  f32 min = min_f32x8(distances, 0, &triangle_index);
 
   if (min < hit->distance) {
     hit->distance = min;
@@ -345,6 +338,7 @@ internal inline b8 ray_triangles_hit_8(
     );
     hit->shader     = triangles->aos[t].shader;
 
+    hit->normal_geo = triangles->aos[t].normal;
     hit->tangent    = triangles->aos[t].tangent;
     hit->bitangent  = triangles->aos[t].bitangent;
 
@@ -560,6 +554,14 @@ internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocat
 
 Image background_image = {0};
 
+Color3 srgb_to_linear(Color3 x) {
+  return vec3(
+    pow_f32((x.r + 0.055f) / 1.055f, 2.4),
+    pow_f32((x.g + 0.055f) / 1.055f, 2.4),
+    pow_f32((x.b + 0.055f) / 1.055f, 2.4),
+  );
+}
+
 Vec3 sample_background(Vec3 dir) {
   f32 invPi    = 1.0f / PI;
   f32 invTwoPi = 1.0f / (2.0f * PI);
@@ -579,7 +581,7 @@ Vec3 sample_background(Vec3 dir) {
     IDX(background_image.pixels, background_image.components * (ui + background_image.width * vi) + 2) / 255.0f,
   );
 
-  return color;
+  return srgb_to_linear(color);
 }
 
 internal inline void ray_triangles_hit(Ray *ray, Triangles *triangles, Hit *hit) {
@@ -716,13 +718,13 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
 
   Color3 albedo = data->albedo;
   if (data->texture_albedo) {
-    albedo = vec3_mul(data->albedo, sample_texture(data->texture_albedo, input->tex_coords));
+    albedo = vec3_mul(data->albedo, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
   }
   output->tint = albedo;
 
   Color3 emmission = data->emission;
   if (data->texture_emission) {
-    emmission = vec3_mul(emmission, sample_texture(data->texture_emission, input->tex_coords));
+    emmission = vec3_mul(emmission, srgb_to_linear(sample_texture(data->texture_emission, input->tex_coords)));
   }
   output->emission = emmission;
 
@@ -747,11 +749,13 @@ internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Ou
     Vec3 b = input->bitangent;
     Vec3 n = input->normal;
 
+    f32 s = (1 - data->normal_map_strength) / data->normal_map_strength;
+
     normal = vec3_normalize(
       vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 1.0 / data->normal_map_strength,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 1.0 / data->normal_map_strength,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 1.0 / data->normal_map_strength,
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * s,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * s,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * s,
       )
     );
   }
@@ -778,11 +782,13 @@ internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_
     Vec3 b = input->bitangent;
     Vec3 n = input->normal;
 
+    f32 s = (1 - data->normal_map_strength) / data->normal_map_strength;
+
     normal = vec3_normalize(
       vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * 1.0 / data->normal_map_strength,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * 1.0 / data->normal_map_strength,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * 1.0 / data->normal_map_strength,
+        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * s,
+        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * s,
+        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * s,
       )
     );
   }
@@ -800,9 +806,15 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
     Hit hit = { .distance = F32_INFINITY, };
     ray_bvh_hit(&ray, bvh, &hit);
     if (hit.distance != F32_INFINITY) {
+      if (vec3_dot(hit.normal_geo, ray.direction) > 0) {
+        ray.position = vec3_add(hit.point, vec3_scale(ray.direction, EPSILON));
+        continue;
+      }
+
       Shader_Input shader_input = {
         .direction  = ray.direction,
         .normal     = hit.normal,
+        .normal_geo = hit.normal_geo,
         .tangent    = hit.tangent,
         .bitangent  = hit.bitangent,
         .position   = hit.point,
@@ -816,7 +828,13 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
       emission         = vec3_add(emission, vec3_mul(shader_output.emission, accumulated_tint));
       accumulated_tint = vec3_mul(accumulated_tint, shader_output.tint);
 
-      ray.position     = vec3_add(hit.point, vec3_scale(hit.normal, max(EPSILON, -0.02f * vec3_dot(ray.direction, hit.normal))));
+      // NOTE(Franz): normal interpolation/mapping shenanigans
+      // essentially the idea is that if the mapped normal results in a reflection
+      // going into the model we make sure it actually goes in and then ignore the
+      // backface collision on the othe side. Maybe this should be the shaders
+      // responsibility
+      f32 position_bias = (0.5f - (vec3_dot(hit.normal_geo, shader_output.direction) < 0)) * 2.0f * EPSILON;
+      ray.position = vec3_add(hit.point, vec3_scale(hit.normal_geo, position_bias));
 
       if (shader_output.terminate) {
         break;
@@ -835,6 +853,19 @@ internal inline f32 aces_f32(f32 x) {
   const f32 d = 0.59;
   const f32 e = 0.14;
   return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+internal inline f32 reinhard_f32(f32 x) {
+  const f32 L_white = 4;
+  return clamp((x * (1.0 + x / (L_white * L_white))) / (1.0 + x), 0, 1);
+}
+
+internal inline Color3 tonemap(Color3 x) {
+  return vec3(
+    clamp(x.r, 0, 1),
+    clamp(x.g, 0, 1),
+    clamp(x.b, 0, 1),
+  );
 }
 
 internal inline f32x8 fract_f32x8(f32x8 x) { return _mm256_sub_ps(x, _mm256_floor_ps(x)); }
@@ -951,21 +982,12 @@ void render_thread_proc(rawptr arg) {
         }
 
         color = vec3_scale(color, 1.0f / SAMPLES);
-        // color = vec3(
-        //   aces_f32(color.r),
-        //   aces_f32(color.g),
-        //   aces_f32(color.b),
-        // );
+        color = tonemap(color);
         color = vec3(
-          clamp(color.r, 0, 1),
-          clamp(color.g, 0, 1),
-          clamp(color.b, 0, 1),
+          pow_f32(color.r, 1.0f / 2.2f),
+          pow_f32(color.g, 1.0f / 2.2f),
+          pow_f32(color.b, 1.0f / 2.2f),
         );
-        // color = vec3(
-        //   pow_f32(color.r, 1.0f / 2.2f),
-        //   pow_f32(color.g, 1.0f / 2.2f),
-        //   pow_f32(color.b, 1.0f / 2.2f),
-        // );
         color = vec3_scale(color, 255.999f);
 
         IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 0) = (u8)color.data[0];
@@ -1126,7 +1148,7 @@ i32 main() {
 
   Duration time = time_since(start_time);
   fmt_printflnc("%dms", (isize)(time / Millisecond));
-  fmt_printflnc("%d samples/second", (isize)(WIDTH * HEIGHT * SAMPLES / (f64)((f64)time / Second)));
+  fmt_printflnc("%d samples/second", (isize)((u64)WIDTH * HEIGHT * SAMPLES / (f64)((f64)time / Second)));
 
   Fd output_file = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));
   Writer output_writer = writer_from_handle(output_file);

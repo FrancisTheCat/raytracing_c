@@ -78,7 +78,7 @@ typedef struct {
 } Ray;
 
 typedef struct {
-  Vec3 direction, normal, tangent, bitangent, position;
+  Vec3 direction, normal, normal_geo, tangent, bitangent, position;
   Vec2 tex_coords;
 } Shader_Input;
 
@@ -97,7 +97,7 @@ typedef struct {
 
 typedef struct {
   f32         distance;
-  Vec3        normal, point, tangent, bitangent;
+  Vec3        normal, normal_geo, point, tangent, bitangent;
   Vec2        tex_coords;
   Shader      shader;
   b8          back_face;
@@ -122,7 +122,7 @@ typedef struct {
 typedef Slice(Triangle) Triangle_Slice;
 
 typedef struct {
-  Vec3   normal_a, normal_b, normal_c;
+  Vec3   normal, normal_a, normal_b, normal_c;
   Vec3   tangent, bitangent;
   Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
   Shader shader;
