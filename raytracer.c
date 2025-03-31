@@ -562,28 +562,6 @@ Color3 srgb_to_linear(Color3 x) {
   );
 }
 
-Vec3 sample_background(Vec3 dir) {
-  f32 invPi    = 1.0f / PI;
-  f32 invTwoPi = 1.0f / (2.0f * PI);
-
-  f32 u = 0.5f + atan2_f32(dir.x, dir.z) * invTwoPi;
-  f32 v = 0.5f - asin_f32(dir.y) * invPi;
-
-  i32 ui = u * background_image.width;
-  i32 vi = v * background_image.height;
-
-  ui = clamp(ui, 0, background_image.width);
-  vi = clamp(vi, 0, background_image.height);
-
-  Vec3 color = vec3(
-    IDX(background_image.pixels, background_image.components * (ui + background_image.width * vi) + 0) / 255.0f,
-    IDX(background_image.pixels, background_image.components * (ui + background_image.width * vi) + 1) / 255.0f,
-    IDX(background_image.pixels, background_image.components * (ui + background_image.width * vi) + 2) / 255.0f,
-  );
-
-  return srgb_to_linear(color);
-}
-
 internal inline void ray_triangles_hit(Ray *ray, Triangles *triangles, Hit *hit) {
   for_range(offset, 0, (triangles->len + 7) / 8) {
     ray_triangles_hit_8(ray, triangles, offset * 8, hit);
@@ -667,6 +645,17 @@ internal Vec3 sample_texture_bilinear(Image *texture, Vec2 tex_coords) {
   Vec3 c0 = vec3_lerp(c00, c10, a);
   Vec3 c1 = vec3_lerp(c01, c11, a);
   return vec3_lerp(c0, c1, b);
+}
+
+Vec3 sample_background(Vec3 dir) {
+  f32 invPi    = 1.0f / PI;
+  f32 invTwoPi = 1.0f / (2.0f * PI);
+
+  f32 u = 0.5f + atan2_f32(dir.x, dir.z) * invTwoPi;
+  f32 v = 0.5f - asin_f32(dir.y) * invPi;
+
+  Vec3 color = sample_texture(&background_image, vec2(u, v));
+  return srgb_to_linear(color);
 }
 
 typedef struct {
