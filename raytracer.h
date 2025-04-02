@@ -45,6 +45,34 @@ typedef union {
   },                                       \
 }
 
+internal inline Matrix_3x3 matrix_3x3_from_basis(Vec3 a, Vec3 b, Vec3 c) {
+  return (Matrix_3x3) {
+    .rows = {
+      { a.x, b.x, c.x, },
+      { a.y, b.y, c.y, },
+      { a.z, b.z, c.z, },
+    },
+  };
+}
+
+internal inline Matrix_3x3 matrix_3x3_transpose(Matrix_3x3 m) {
+  return (Matrix_3x3) {
+    .rows = {
+      { m.rows[0][0], m.rows[1][0], m.rows[2][0], },
+      { m.rows[0][1], m.rows[1][1], m.rows[2][1], },
+      { m.rows[0][2], m.rows[1][2], m.rows[2][2], },
+    },
+  };
+}
+
+internal inline Vec3 matrix_3x3_mul_vec3(Matrix_3x3 m, Vec3 v) {
+  return vec3(
+    v.x * m.rows[0][0] + v.y * m.rows[0][1] + v.z * m.rows[0][2],
+    v.x * m.rows[1][0] + v.y * m.rows[1][1] + v.z * m.rows[1][2],
+    v.x * m.rows[2][0] + v.y * m.rows[2][1] + v.z * m.rows[2][2],
+  );
+}
+
 internal inline Matrix_3x3 matrix_3x3_rotate(Vec3 v, f32 radians) {
   f32 c = cos_f32(radians);
   f32 s = sin_f32(radians);
@@ -57,17 +85,14 @@ internal inline Matrix_3x3 matrix_3x3_rotate(Vec3 v, f32 radians) {
   rot.rows[0][0] = c + t.data[0] * a.data[0];
   rot.rows[1][0] = 0 + t.data[0] * a.data[1] + s * a.data[2];
   rot.rows[2][0] = 0 + t.data[0] * a.data[2] - s * a.data[1];
-  rot.rows[3][0] = 0;
 
   rot.rows[0][1] = 0 + t.data[1] * a.data[0] - s * a.data[2];
   rot.rows[1][1] = c + t.data[1] * a.data[1];
   rot.rows[2][1] = 0 + t.data[1] * a.data[2] + s * a.data[0];
-  rot.rows[3][1] = 0;
 
   rot.rows[0][2] = 0 + t.data[2] * a.data[0] + s * a.data[1];
   rot.rows[1][2] = 0 + t.data[2] * a.data[1] - s * a.data[0];
   rot.rows[2][2] = c + t.data[2] * a.data[2];
-  rot.rows[3][2] = 0;
 
   return rot;
 }
@@ -100,7 +125,6 @@ typedef struct {
   Vec3        normal, normal_geo, point, tangent, bitangent;
   Vec2        tex_coords;
   Shader      shader;
-  b8          back_face;
 } Hit;
 
 typedef struct {

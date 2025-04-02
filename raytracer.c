@@ -1,8 +1,8 @@
 #include "raytracer.h"
 
-#define WIDTH          2048
-#define HEIGHT         2048
-#define SAMPLES        256
+#define WIDTH          1024
+#define HEIGHT         1024
+#define SAMPLES        128
 #define MAX_BOUNCES    8
 #define USE_THREADS    1
 #define N_THREADS      16
@@ -554,7 +554,7 @@ internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocat
 
 Image background_image = {0};
 
-Color3 srgb_to_linear(Color3 x) {
+internal inline Color3 srgb_to_linear(Color3 x) {
   return vec3(
     pow_f32((x.r + 0.055f) / 1.055f, 2.4),
     pow_f32((x.g + 0.055f) / 1.055f, 2.4),
@@ -658,136 +658,6 @@ Vec3 sample_background(Vec3 dir) {
   return srgb_to_linear(color);
 }
 
-typedef struct {
-  Vec3 albedo;
-} Diffuse_Shader_Data;
-
-internal void diffuse_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  Diffuse_Shader_Data const *data = (Diffuse_Shader_Data *)_data;
-
-  output->tint      = data->albedo;
-  output->direction = vec3_normalize(vec3_add(rand_vec3(), input->normal));
-}
-
-typedef struct {
-  Vec3 tint;
-  f32  roughness;
-} Metal_Shader_Data;
-
-internal void metal_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  Metal_Shader_Data const *data = (Metal_Shader_Data *)_data;
-
-  output->tint      = data->tint;
-  output->direction = vec3_normalize(
-    vec3_add(
-      vec3_reflect(input->direction, input->normal),
-      vec3_scale(rand_vec3(), data->roughness)
-    )
-  );
-}
-
-enum {
-  PBR_Type_Metal,
-  PBR_Type_Diffuse,
-  // PBR_Type_Dielectric,
-};
-
-typedef struct {
-  Vec3   albedo, emission;
-  f32    roughness, normal_map_strength;
-  u8     type;
-  Image *texture_albedo;
-  Image *texture_normal;
-  Image *texture_metal_roughness;
-  Image *texture_emission;
-} PBR_Shader_Data;
-
-internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
-
-  Color3 albedo = data->albedo;
-  if (data->texture_albedo) {
-    albedo = vec3_mul(data->albedo, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
-  }
-  output->tint = albedo;
-
-  Color3 emmission = data->emission;
-  if (data->texture_emission) {
-    emmission = vec3_mul(emmission, srgb_to_linear(sample_texture(data->texture_emission, input->tex_coords)));
-  }
-  output->emission = emmission;
-
-  u8  type      = data->type;
-  f32 roughness = data->roughness;
-  if (data->texture_metal_roughness) {
-    Vec3 mr = sample_texture(data->texture_metal_roughness, input->tex_coords);
-    if (mr.b > 0.5f) {
-      type = PBR_Type_Metal;
-    } else {
-      type = PBR_Type_Diffuse;
-    }
-    roughness *= mr.g;
-  }
-
-  Vec3 normal = input->normal;
-  if (data->texture_normal) {
-    Vec3 v = sample_texture(data->texture_normal, input->tex_coords);
-         v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
-
-    Vec3 t = input->tangent;
-    Vec3 b = input->bitangent;
-    Vec3 n = input->normal;
-
-    f32 s = (1 - data->normal_map_strength) / data->normal_map_strength;
-
-    normal = vec3_normalize(
-      vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * s,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * s,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * s,
-      )
-    );
-  }
-
-  switch (type) {
-  CASE PBR_Type_Metal:
-    Vec3 dir          = vec3_reflect(input->direction, normal);
-         dir          = vec3_add(dir, vec3_scale(rand_vec3(), roughness));
-    output->direction = vec3_normalize(dir);
-  CASE PBR_Type_Diffuse:
-    output->direction = vec3_normalize(vec3_add(rand_vec3(), normal));
-  }
-}
-
-internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
-
-  Vec3 normal = input->normal;
-  if (data->texture_normal) {
-    Vec3 v = sample_texture(data->texture_normal, input->tex_coords);
-         v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
-
-    Vec3 t = input->tangent;
-    Vec3 b = input->bitangent;
-    Vec3 n = input->normal;
-
-    f32 s = (1 - data->normal_map_strength) / data->normal_map_strength;
-
-    normal = vec3_normalize(
-      vec3(
-        .x = v.x * t.x + v.y * b.x + v.z * n.x + n.x * s,
-        .y = v.x * t.y + v.y * b.y + v.z * n.y + n.y * s,
-        .z = v.x * t.z + v.y * b.z + v.z * n.z + n.z * s,
-      )
-    );
-  }
-
-  // output->emission  = vec3_broadcast(normal.y * 0.5 + 0.5);
-  // output->emission  = vec3_broadcast(vec3_dot(normal, vec3(0, 1, 0)));
-  output->emission  = vec3_add(vec3_scale(normal, 0.5), vec3_broadcast(0.5f));
-  output->terminate = true;
-}
-
 Color3 cast_ray(BVH *bvh, Ray ray) {
   Color3 accumulated_tint = vec3(1, 1, 1);
   Color3 emission         = {0};
@@ -795,14 +665,17 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
     Hit hit = { .distance = F32_INFINITY, };
     ray_bvh_hit(&ray, bvh, &hit);
     if (hit.distance != F32_INFINITY) {
-      if (vec3_dot(hit.normal_geo, ray.direction) > 0) {
+      if (
+        vec3_dot(hit.normal_geo, ray.direction) > 0 ||
+        vec3_dot(hit.normal,     ray.direction) > 0
+      ) {
         ray.position = vec3_add(hit.point, vec3_scale(ray.direction, EPSILON));
         continue;
       }
 
       Shader_Input shader_input = {
         .direction  = ray.direction,
-        .normal     = hit.normal,
+        .normal     = vec3_normalize(hit.normal),
         .normal_geo = hit.normal_geo,
         .tangent    = hit.tangent,
         .bitangent  = hit.bitangent,
@@ -813,8 +686,13 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
 
       hit.shader.proc(hit.shader.data, &shader_input, &shader_output);
 
+      emission = vec3_add(emission, vec3_mul(shader_output.emission, accumulated_tint));
+
+      if (shader_output.terminate) {
+        break;
+      }
+
       ray.direction    = shader_output.direction;
-      emission         = vec3_add(emission, vec3_mul(shader_output.emission, accumulated_tint));
       accumulated_tint = vec3_mul(accumulated_tint, shader_output.tint);
 
       // NOTE(Franz): normal interpolation/mapping shenanigans
@@ -824,10 +702,6 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
       // responsibility
       f32 position_bias = (0.5f - (vec3_dot(hit.normal_geo, shader_output.direction) < 0)) * 2.0f * EPSILON;
       ray.position = vec3_add(hit.point, vec3_scale(hit.normal_geo, position_bias));
-
-      if (shader_output.terminate) {
-        break;
-      }
     } else {
       return vec3_add(vec3_mul(sample_background(ray.direction), accumulated_tint), emission);
     }
@@ -999,6 +873,337 @@ internal void load_texture(String path, Image *texture) {
   }
 }
 
+internal inline Vec3 sample_cosine_hemisphere() {
+  f32 angle    = rand_f32() * 2 * PI;
+  f32 distance = sqrt_f32(rand_f32());
+  Vec3 v = vec3(
+    .x = sin_f32(angle) * distance,
+    .y = cos_f32(angle) * distance,
+  );
+  v.z = sqrt_f32(1 - distance * distance);
+  return v;
+}
+
+internal inline Vec3 normal_map_apply(Image *normal_map, f32 normal_map_strength, Shader_Input const *input) {
+  Vec3 normal = input->normal;
+  if (normal_map) {
+    Vec3 v = sample_texture(normal_map, input->tex_coords);
+         v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
+
+    Vec3 t = input->tangent;
+    Vec3 b = input->bitangent;
+    Vec3 n = input->normal;
+
+    f32 s = normal_map_strength;
+
+    normal = vec3_normalize(
+      vec3(
+        .x = s * (v.x * t.x + v.y * b.x + v.z * n.x) + n.x * (1 - s),
+        .y = s * (v.x * t.y + v.y * b.y + v.z * n.y) + n.y * (1 - s),
+        .z = s * (v.x * t.z + v.y * b.z + v.z * n.z) + n.z * (1 - s),
+      )
+    );
+  }
+
+  return normal;
+}
+
+internal inline void basis(Vec3 view, Vec3 normal, Vec3 *tangent, Vec3 *bitangent) {
+  if (abs_f32(vec3_dot(normal, view)) < 0.999f) {
+    *tangent = vec3_normalize(vec3_cross(normal, view));
+  } else if (abs_f32(vec3_dot(normal, vec3(0, 1, 0))) < 0.95f) {
+    *tangent = vec3_normalize(vec3_cross(normal, vec3(0, 1, 0)));
+  } else {
+    *tangent = vec3_normalize(vec3_cross(normal, vec3(1, 0, 0)));
+  }
+  *bitangent = vec3_cross(normal, *tangent);
+}
+
+internal inline Color3 disney_calculate_sheen_tint(Color3 base_color) {
+  f32 luminance = vec3_dot(vec3(0.3f, 0.6f, 1.0f), base_color);
+  return (luminance > 0.0f) ? vec3_scale(base_color, (1.0f / luminance)) : vec3(1, 1, 1);
+}
+
+internal inline f32 disney_fresnel_schlick_weight(f32 cos_theta) {
+  f32 m = 1 - cos_theta;
+  return m * m * m * m * m;
+}
+
+internal inline Vec3 disney_evaluate_sheen(f32 sheen, Color3 base_color, f32 sheen_tint, f32 h_dot_l) {
+  if (sheen <= 0.0f) {
+    return vec3(0);
+  }
+
+  Vec3 tint = disney_calculate_sheen_tint(base_color);
+  return vec3_scale(vec3_lerp(vec3(1, 1, 1), tint, sheen_tint), sheen * disney_fresnel_schlick_weight(h_dot_l));
+}
+
+enum {
+  PBR_Type_Metal,
+  PBR_Type_Diffuse,
+  // PBR_Type_Dielectric,
+};
+
+typedef struct {
+  Vec3   base_color, emission;
+  f32    roughness, metalness, normal_map_strength, sheen, sheen_tint, anisotropic_aspect;
+  Image *texture_albedo;
+  Image *texture_normal;
+  Image *texture_metal_roughness;
+  Image *texture_emission;
+} PBR_Shader_Data;
+
+internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
+
+  Color3 albedo = data->base_color;
+  if (data->texture_albedo) {
+    albedo = vec3_mul(data->base_color, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
+  }
+  output->tint = albedo;
+
+  Color3 emmission = data->emission;
+  if (data->texture_emission) {
+    emmission = vec3_mul(emmission, srgb_to_linear(sample_texture(data->texture_emission, input->tex_coords)));
+  }
+  output->emission = emmission;
+
+  f32 metalness = data->metalness;
+  f32 roughness = data->roughness;
+  if (data->texture_metal_roughness) {
+    Vec3 mr = sample_texture(data->texture_metal_roughness, input->tex_coords);
+    metalness *= mr.b;
+    roughness *= mr.g;
+  }
+
+  Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
+
+  if (rand_f32() < metalness) {
+    Vec3 dir          = vec3_reflect(input->direction, normal);
+         dir          = vec3_add(dir, vec3_scale(rand_vec3(), roughness));
+    output->direction = vec3_normalize(dir);
+  } else {
+    output->direction = vec3_normalize(vec3_add(rand_vec3(), normal));
+  }
+}
+
+internal inline f32 luminance(Vec3 x) {
+	return vec3_dot(x, vec3(0.2126f, 0.7152f, 0.0722f));
+}
+
+internal inline f32 fresnel_schlick_f32(f32 f0, f32 f90, f32 theta) {
+  return f0 + (f90 - f0) * pow_f32(1 - theta, 5);
+}
+
+internal inline Vec3 fresnel_schlick_vec3(Vec3 f0, f32 f90, f32 theta) {
+  return vec3_add(f0, vec3_scale(vec3_sub(vec3_broadcast(f90), f0), pow_f32(1 - theta, 5)));
+}
+
+internal inline f32 distribution_GGX(f32 roughness, f32 NoH, f32 k) {
+  f32 a2 = roughness * roughness;
+  return a2 / (PI * pow_f32((NoH * NoH) * (a2 * a2 - 1) + 1, k));
+}
+
+internal inline f32 smith_G(f32 NDotV, f32 alpha2) {
+  f32 a = alpha2 * alpha2;
+  f32 b = NDotV  * NDotV;
+  return (2.0 * NDotV) / (NDotV + sqrt_f32(a + b - a * b));
+}
+
+internal inline f32 geometry_term(f32 NoL, f32 NoV, f32 roughness) {
+  f32 a2 = roughness * roughness;
+  f32 G1 = smith_G(NoV, a2);
+  f32 G2 = smith_G(NoL, a2);
+  return G1 * G2;
+}
+
+internal inline Vec3 sample_GGX_VNDF(Vec3 V, f32 ax, f32 ay) {
+  Vec3 Vh = vec3_normalize(vec3(ax * V.x, ay * V.y, V.z));
+
+  f32 lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  Vec3 T1 = lensq > 0 ? vec3_scale(vec3(-Vh.y, Vh.x, 0), 1.0f / sqrt_f32(lensq)) : vec3(1, 0, 0);
+  Vec3 T2 = vec3_cross(Vh, T1);
+
+  f32 r   = sqrt_f32(rand_f32());
+  f32 phi = 2.0 * PI * rand_f32();
+  f32 t1  = r * cos_f32(phi);
+  f32 t2  = r * sin_f32(phi);
+  f32 s   = 0.5 * (1.0 + Vh.z);
+  t2      = (1.0 - s) * sqrt_f32(1.0 - t1 * t1) + s * t2;
+
+  Vec3 Nh = vec3_add(
+    vec3_add(vec3_scale(T1, t1), vec3_scale(T2, t2)),
+    vec3_scale(Vh, sqrt_f32(max(0.0, 1.0 - t1 * t1 - t2 * t2)))
+  );
+
+  return vec3_normalize(vec3(ax * Nh.x, ay * Nh.y, max(0.0, Nh.z)));
+}
+
+internal inline f32 pdf_GGX_VNDF(f32 NoH, f32 NoV, f32 roughness) {
+ 	f32 D  = distribution_GGX(roughness, NoH, 2);
+  f32 G1 = smith_G(NoV, roughness * roughness);
+  return (D * G1) / max(0.00001f, 4.0f * NoV);
+}
+
+internal inline Vec3 disney_eval_diffuse(Color3 base_color, f32 NoL, f32 NoV, f32 LoH, f32 roughness) {
+  f32 FD90 = 0.5f + 2 * roughness * LoH * LoH;
+  f32 a = fresnel_schlick_f32(1.0f, FD90, NoL);
+  f32 b = fresnel_schlick_f32(1.0f, FD90, NoV);
+
+  return vec3_scale(base_color, (a * b / PI));
+}
+
+internal inline Vec3 disney_eval_specular(f32 roughness, Vec3 F, f32 NoH, f32 NoV, f32 NoL) {
+  f32 D = distribution_GGX(roughness, NoH, 2);
+  f32 G = geometry_term(NoL, NoV, roughness);
+
+  return vec3_scale(F, D * G / (4 * NoL * NoV));
+}
+
+internal inline f32 shadowed_f90(Vec3 f0) {
+	const float t = 1.0f / 0.04f;
+	return min(1.0f, t * luminance(f0));
+}
+
+typedef struct {
+  f32  roughness, metalness, sheen, sheen_tint, anisotropic_aspect;
+  Vec3 base_color;
+} Disney_BRDF_Data;
+
+Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir) {
+  f32  aspect       = data->anisotropic_aspect;
+  f32  alpha_x      = (data->roughness * data->roughness) / aspect;
+  f32  alpha_y      = (data->roughness * data->roughness) * aspect;
+  Vec3 micro_normal = sample_GGX_VNDF(in_dir, alpha_x, alpha_y);
+
+  Vec3 f0      = vec3_lerp(vec3_broadcast(0.04f), data->base_color, data->metalness);
+	Vec3 fresnel = fresnel_schlick_vec3(f0, shadowed_f90(f0), vec3_dot(in_dir, micro_normal));
+
+  f32 diffuse_weight  = 1 - data->metalness;
+  f32 specular_weight = luminance(fresnel);
+  f32 inverse_weight  = 1 / (diffuse_weight + specular_weight);
+
+  diffuse_weight  *= inverse_weight;
+  specular_weight *= inverse_weight;
+  
+  Vec4 brdf = vec4(0);
+  if (rand_f32() < diffuse_weight) {
+    *out_dir = sample_cosine_hemisphere();
+    micro_normal = vec3_normalize(vec3_add(*out_dir, in_dir));
+    
+    f32 NoL = out_dir->z;
+    f32 NoV = in_dir.z;
+    if (NoL <= 0 || NoV <= 0) {
+      return vec4(0);
+    }
+    f32 LoH = vec3_dot(*out_dir, micro_normal);
+    f32 pdf = NoL / PI;
+    
+    Vec3 diff = vec3_mul(disney_eval_diffuse(data->base_color, NoL, NoV, LoH, data->roughness), vec3_sub(vec3(1, 1, 1), fresnel));
+         diff = vec3_add(diff, disney_evaluate_sheen(data->sheen, data->base_color, data->sheen_tint, LoH));
+    brdf = vec4(
+      diff.r * NoL,
+      diff.g * NoL,
+      diff.b * NoL,
+      diffuse_weight * pdf
+    );
+  } else {
+    *out_dir = vec3_reflect(vec3_scale(in_dir, -1), micro_normal);
+    
+    f32 NoL = out_dir->z;
+    f32 NoV = in_dir.z;
+    if (NoL <= 0 || NoV <= 0) {
+      return vec4(0);
+    }
+    f32 NoH = min(micro_normal.z, 0.99f);
+    f32 pdf = pdf_GGX_VNDF(NoH, NoV, data->roughness);
+    
+    Vec3 spec = disney_eval_specular(data->roughness, fresnel, NoH, NoV, NoL);
+    brdf = vec4(
+      spec.r * NoL,
+      spec.g * NoL,
+      spec.b * NoL,
+      specular_weight * pdf
+    );
+  }
+
+  *out_dir = vec3_normalize(*out_dir);
+
+  return brdf;
+}
+
+internal void disney_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
+  Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
+
+  Vec3 base_color = data->base_color;
+  if (data->texture_albedo) {
+    base_color = vec3_mul(base_color, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
+  }
+
+  f32 roughness = data->roughness;
+  f32 metalness = data->metalness;
+
+  if (data->texture_metal_roughness) {
+    Vec3 mr = sample_texture(data->texture_metal_roughness, input->tex_coords);
+    roughness *= mr.g;
+    metalness *= mr.b;
+  }
+
+  roughness = clamp(roughness, 0.001f, 1);
+  // uhh there's reasons for this
+  if (metalness > 0.9f) {
+    metalness = 0.9f;
+  }
+  metalness /= 0.9f;
+
+  Color3 emmission = data->emission;
+  if (data->texture_emission) {
+    emmission = vec3_mul(emmission, srgb_to_linear(sample_texture(data->texture_emission, input->tex_coords)));
+  }
+  output->emission = emmission;
+
+  Vec3 t, b;
+  basis(input->direction, normal, &t, &b);
+  Matrix_3x3 tangent_to_world = matrix_3x3_from_basis(t, b, normal);
+  Matrix_3x3 world_to_tangent = matrix_3x3_transpose(tangent_to_world);
+
+  Disney_BRDF_Data brdf_data = {
+    .roughness          = roughness,
+    .metalness          = metalness,
+    .base_color         = base_color,
+    .sheen              = data->sheen,
+    .sheen_tint         = data->sheen_tint,
+    .anisotropic_aspect = data->anisotropic_aspect,
+  };
+  
+  Vec3 in_dir = matrix_3x3_mul_vec3(world_to_tangent, vec3_scale(input->direction, -1));
+  Vec4 brdf   = sample_disney_BRDF(&brdf_data, in_dir, &output->direction);
+
+  output->direction = matrix_3x3_mul_vec3(tangent_to_world, output->direction);
+
+  if (brdf.a > 0) {
+    output->tint = vec3(
+      brdf.r / brdf.a,
+      brdf.g / brdf.a,
+      brdf.b / brdf.a,
+    );
+  } else {
+    output->terminate = true;
+  }
+}
+
+internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
+  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
+
+  Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
+
+  // output->emission  = vec3_broadcast(normal.y * 0.5 + 0.5);
+  // output->emission  = vec3_broadcast(vec3_dot(normal, vec3(0, 1, 0)));
+  output->emission  = vec3_add(vec3_scale(normal, 0.5), vec3_broadcast(0.5f));
+  output->terminate = true;
+}
+
 i32 main() {
   context.logger = (Logger) {0};
 
@@ -1049,30 +1254,81 @@ i32 main() {
     n_triangles = bvh.triangles.len;
   #else
     Byte_Slice data = unwrap_err(read_entire_file_path(LIT("helmet.obj"), context.allocator));
-    Obj_File obj = {0};
+    Obj_File   obj  = {0};
     obj_load(bytes_to_string(data), &obj, context.allocator);
 
     Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
 
+    n_triangles = obj.triangles.len;
+
     Shader shader = {
       .data = &(PBR_Shader_Data) {
-        .albedo                  = vec3(1, 1, 1),
+        .base_color              = vec3(1, 1, 1),
         .emission                = vec3(1, 1, 1),
-        .roughness               = 1.0f,
-        .normal_map_strength     = 1.0f,
+        .roughness               = 1,
+        .metalness               = 1,
+        .normal_map_strength     = 0.5f,
+        .anisotropic_aspect      = 1, // sqrt_f32(1 - 0.9f * anisotropic)
         .texture_albedo          = &texture_albedo,
         .texture_metal_roughness = &texture_metal_roughness,
         .texture_emission        = &texture_emission,
         .texture_normal          = &texture_normal,
       },
-      .proc = pbr_shader_proc,
+      .proc = disney_shader_proc,
     };
 
+    // Shader metal_shader = {
+    //   .data = &(PBR_Shader_Data) {
+    //     .albedo                  = vec3(0.9, 0.9, 0.9),
+    //     .roughness               = 0.2f,
+    //     .metalness               = 1,
+    //     .anisotropic_aspect      = 1,
+    //   },
+    //   .proc = disney_shader_proc,
+    // };
+    // Shader diffuse_shader = {
+    //   .data = &(PBR_Shader_Data) {
+    //     .albedo                  = vec3(0.5f, 0.95f, 0.45f),
+    //     .roughness               = 0.2f,
+    //     .metalness               = 0,
+    //     .anisotropic_aspect      = 1,
+    //   },
+    //   .proc = disney_shader_proc,
+    // };
+    // Shader mirror_shader = {
+    //   .data = &(PBR_Shader_Data) {
+    //     .albedo                  = vec3(1, 1, 1),
+    //     .roughness               = 0,
+    //     .metalness               = 1,
+    //     .anisotropic_aspect      = 1,
+    //   },
+    //   .proc = disney_shader_proc,
+    // };
+    // Shader red_shader = {
+    //   .data = &(PBR_Shader_Data) {
+    //     .albedo                  = vec3(0.95f, 0.25f, 0.25f),
+    //     .roughness               = 0.7f,
+    //     .metalness               = 0.3f,
+    //     .anisotropic_aspect      = 1,
+    //   },
+    //   .proc = disney_shader_proc,
+    // };
+
+    // shader = (Shader) {
+    //   .data = &(BRDF_Shader_Data) {
+    //     .tint       = vec3(0xdc / 255.0, 0x7c / 255.0, 0x47 / 255.0),
+    //     .roughness  = 0.001f,
+    //     .normal_map = &texture_normal,
+    //     .normal_map_strength = 1,
+    //   },
+    //   .proc = brdf_shader_proc,
+    // };
+
     slice_iter_v(obj.triangles, t, i, {
-      IDX(triangles, i) = (Triangle) {
-        .a            = t.a.position,
-        .b            = t.b.position,
-        .c            = t.c.position,
+      IDX(triangles, i + n_triangles * 0) = (Triangle) {
+        .a            = t.a.position, // vec3_add(t.a.position, vec3(-1.5f, -1.5f, 0)),
+        .b            = t.b.position, // vec3_add(t.b.position, vec3(-1.5f, -1.5f, 0)),
+        .c            = t.c.position, // vec3_add(t.c.position, vec3(-1.5f, -1.5f, 0)),
         .normal_a     = t.a.normal,
         .normal_b     = t.b.normal,
         .normal_c     = t.c.normal,
@@ -1081,7 +1337,48 @@ i32 main() {
         .tex_coords_c = t.c.tex_coords,
         .shader       = shader,
       };
+
+      // IDX(triangles, i + n_triangles * 1) = (Triangle) {
+      //   .a            = vec3_add(t.a.position, vec3(-1.5f, +1.5f, 0)),
+      //   .b            = vec3_add(t.b.position, vec3(-1.5f, +1.5f, 0)),
+      //   .c            = vec3_add(t.c.position, vec3(-1.5f, +1.5f, 0)),
+      //   .normal_a     = t.a.normal,
+      //   .normal_b     = t.b.normal,
+      //   .normal_c     = t.c.normal,
+      //   .tex_coords_a = t.a.tex_coords,
+      //   .tex_coords_b = t.b.tex_coords,
+      //   .tex_coords_c = t.c.tex_coords,
+      //   .shader       = diffuse_shader,
+      // };
+
+      // IDX(triangles, i + n_triangles * 2) = (Triangle) {
+      //   .a            = vec3_add(t.a.position, vec3(+1.5f, -1.5f, 0)),
+      //   .b            = vec3_add(t.b.position, vec3(+1.5f, -1.5f, 0)),
+      //   .c            = vec3_add(t.c.position, vec3(+1.5f, -1.5f, 0)),
+      //   .normal_a     = t.a.normal,
+      //   .normal_b     = t.b.normal,
+      //   .normal_c     = t.c.normal,
+      //   .tex_coords_a = t.a.tex_coords,
+      //   .tex_coords_b = t.b.tex_coords,
+      //   .tex_coords_c = t.c.tex_coords,
+      //   .shader       = mirror_shader,
+      // };
+
+      // IDX(triangles, i + n_triangles * 3) = (Triangle) {
+      //   .a            = vec3_add(t.a.position, vec3(+1.5f, +1.5f, 0)),
+      //   .b            = vec3_add(t.b.position, vec3(+1.5f, +1.5f, 0)),
+      //   .c            = vec3_add(t.c.position, vec3(+1.5f, +1.5f, 0)),
+      //   .normal_a     = t.a.normal,
+      //   .normal_b     = t.b.normal,
+      //   .normal_c     = t.c.normal,
+      //   .tex_coords_a = t.a.tex_coords,
+      //   .tex_coords_b = t.b.tex_coords,
+      //   .tex_coords_c = t.c.tex_coords,
+      //   .shader       = red_shader,
+      // };
     });
+
+    n_triangles = triangles.len;
 
     Timestamp bvh_start_time = time_now();
     bvh_init(&bvh, triangles, context.allocator);
@@ -1090,8 +1387,6 @@ i32 main() {
     Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Truncate | FP_Write | FP_Create));
     Writer bvh_out = writer_from_handle(bvh_file);
     bvh_save_writer(&bvh_out, &bvh);
-
-    n_triangles = triangles.len;
   #endif
 
   fmt_printflnc("Width:     %d", WIDTH);
@@ -1139,7 +1434,7 @@ i32 main() {
   fmt_printflnc("%dms", (isize)(time / Millisecond));
   fmt_printflnc("%d samples/second", (isize)((u64)WIDTH * HEIGHT * SAMPLES / (f64)((f64)time / Second)));
 
-  Fd output_file = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));
+  Fd     output_file   = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));
   Writer output_writer = writer_from_handle(output_file);
   assert(png_save_writer(&output_writer, &image));
   file_close(output_file);
