@@ -5,6 +5,7 @@
 #define Material rl_Material
 #define Ray      rl_Ray
 #define Shader   rl_Shader
+#define Camera   rl_Camera
 
 #include "raylib.h"
 
@@ -12,8 +13,9 @@
 #undef Ray
 #undef Material
 #undef Shader
+#undef Camera
 
-#include "bvh.c"
+#include "scene.h"
 
 internal Color colors[] = {
   RAYWHITE,
@@ -61,24 +63,24 @@ internal void draw_bvh(BVH bvh) {
 }
 
 i32 main() {
-  BVH bvh = {0};
+  Scene scene;
 
-  Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Read));
+  Fd bvh_file = unwrap_err(file_open(LIT("test.scene"), FP_Read));
   File_Info fi;
   OS_Error err = file_stat(bvh_file, &fi);
   assert(err == OSE_None);
   Byte_Slice data = slice_make_aligned(Byte_Slice, fi.size, 32, context.allocator);
   isize n_read = unwrap_err(file_read(bvh_file, data));
   assert(n_read == fi.size);
-  b8 ok = bvh_load_bytes(data, &bvh);
+  b8 ok = scene_load_bytes(data, &scene);
   assert(ok);
 
   InitWindow(900, 600, "BVH");
 
-  Camera camera     = { 0 };
+  rl_Camera camera     = { 0 };
   camera.position   = (Vector3){ 10.0f, 10.0f, 10.0f };
-  camera.target     = (Vector3){ 0.0f, 0.0f, 0.0f };
-  camera.up         = (Vector3){ 0.0f, 1.0f, 0.0f };
+  camera.target     = (Vector3){ 0.0f,  0.0f,  0.0f  };
+  camera.up         = (Vector3){ 0.0f,  1.0f,  0.0f  };
   camera.fovy       = 45.0f;
   camera.projection = CAMERA_PERSPECTIVE;
 
@@ -93,8 +95,10 @@ i32 main() {
       ClearBackground(BLACK);
 
       BeginMode3D(camera);
-        draw_bvh(bvh);
+        draw_bvh(scene.bvh);
       EndMode3D();
     EndDrawing();
   }
+
+  CloseWindow();
 }

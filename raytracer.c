@@ -1,55 +1,44 @@
 #include "raytracer.h"
 
-#define WIDTH          1024
-#define HEIGHT         1024
-#define SAMPLES        128
-#define MAX_BOUNCES    8
-#define USE_THREADS    1
-#define N_THREADS      16
-#define USE_CACHED_BVH 0
-#define CHUNK_SIZE     32
+#include "codin/codin.h"
+#include "codin/image.h"
+#include "codin/linalg.h"
+#include "codin/obj.h"
+#include "codin/os.h"
+#include "codin/sort.h"
+#include "codin/strconv.h"
+#include "codin/thread.h"
 
-#define CHUNKS_X ((WIDTH  + CHUNK_SIZE - 1) / CHUNK_SIZE)
-#define CHUNKS_Y ((HEIGHT + CHUNK_SIZE - 1) / CHUNK_SIZE)
-#define N_CHUNKS (CHUNKS_X * CHUNKS_Y)
+#include "scene.h"
+#include "scene.c"
 
-#define EPSILON 0.0001f
+#include "stdatomic.h"
 
-// #define sample_texture sample_texture_nearest
-#define sample_texture sample_texture_bilinear
+internal inline f32 min_f32x8(f32x8 vec, f32 epsilon, i32 *index) {
+  // Set elements less than epsilon to +∞
+  f32x8 inf = _mm256_set1_ps(F32_INFINITY);
+  f32x8 nan_mask = _mm256_cmp_ps(vec, _mm256_set1_ps(epsilon), _CMP_GT_OQ);
+  f32x8 sanitized_vec = _mm256_blendv_ps(inf, vec, nan_mask);
 
-internal thread_local u32 random_state = 0;
+  f32x8 min1 = _mm256_min_ps(sanitized_vec, _mm256_permute_ps(sanitized_vec, 0b10110001));
+  f32x8 min2 = _mm256_min_ps(min1, _mm256_permute_ps(min1, 0b01001110));
+  f32x8 min3 = _mm256_min_ps(min2, _mm256_permute2f128_ps(min2, min2, 0b00000001));
+  
+  f32 min_value = _mm256_cvtss_f32(min3);
 
-u32 rand_u32() {
-  u32 state = random_state * 747796405u + 2891336453u;
-  u32 word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-  random_state = (word >> 22u) ^ word;
-  return random_state;
+  f32x8 cmp  = _mm256_cmp_ps(sanitized_vec, min3, _CMP_EQ_OQ);
+  i32   mask = _mm256_movemask_ps(cmp);
+  *index     = __builtin_ctz(mask);
+
+  return min_value;
 }
 
-f32 rand_f32() {
-  return rand_u32() / (f32)U32_MAX;
-}
-
-f32 rand_f32_range(f32 min, f32 max) {
-  return rand_f32() * (max - min) + min;
-}
-
-Vec3 rand_vec3() {
-  loop {
-    Vec3 p = vec3(
-      rand_f32_range(-1, 1),
-      rand_f32_range(-1, 1),
-      rand_f32_range(-1, 1),
-    );
-    f32 lensq = vec3_length2(p);
-    if (EPSILON < lensq && lensq <= 1) {
-      return vec3_scale(p, 1.0 / sqrt_f32(lensq));
-    }
-  }
-}
-
-internal inline f32x8 ray_spheres_hit_8(Ray *ray, Spheres *spheres, isize offset) {
+internal inline f32x8 ray_spheres_hit_8(
+  Ray     const *ray,
+  Spheres const *spheres,
+  isize          offset,
+  Hit           *hit
+) {
   f32x8 x = _mm256_load_ps(spheres->position_x + offset * 8);
   f32x8 y = _mm256_load_ps(spheres->position_y + offset * 8);
   f32x8 z = _mm256_load_ps(spheres->position_z + offset * 8);
@@ -76,177 +65,29 @@ internal inline f32x8 ray_spheres_hit_8(Ray *ray, Spheres *spheres, isize offset
 
   f32x8 hit_mask = _mm256_cmp_ps(d, _mm256_setzero_ps(), _CMP_LE_OQ);
 
-  f32x8 distance = (-b - d_sqrt) / (2.0f * a);
+  f32x8 distances = (-b - d_sqrt) / (2.0f * a);
 
-  return _mm256_blendv_ps(distance, _mm256_set1_ps(F32_INFINITY), hit_mask);
-}
-
-internal inline Vec3x8 vec3x8_cross(Vec3x8 a, Vec3x8 b) {
-  return (Vec3x8) {
-    .x = a.y * b.z - a.z * b.y,
-    .y = a.z * b.x - a.x * b.z,
-    .z = a.x * b.y - a.y * b.x,
-  };
-}
-
-internal inline Vec3x8 vec3x8_sub(Vec3x8 a, Vec3x8 b) {
-  return (Vec3x8) {
-    .x = a.x - b.x,
-    .y = a.y - b.y,
-    .z = a.z - b.z,
-  };
-}
-
-internal inline Vec3x8 vec3x8_mul(Vec3x8 a, Vec3x8 b) {
-  return (Vec3x8) {
-    .x = a.x * b.x,
-    .y = a.y * b.y,
-    .z = a.z * b.z,
-  };
-}
-
-internal inline f32x8 vec3x8_dot(Vec3x8 a, Vec3x8 b) {
-  return a.x * b.x + a.y * b.y + a.z * b.z;
-}
-
-internal void triangles_init(Triangles *triangles, isize len, isize cap, Allocator allocator) {
-  if (cap % 8) {
-    cap += 8 - cap % 8;
-  }
-  triangles->len       = len;
-  triangles->cap       = cap;
-  triangles->allocator = allocator;
-
-  f32 *data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(cap), 32, allocator));
-
-  triangles->a_x = data + cap * 0;
-  triangles->a_y = data + cap * 1;
-  triangles->a_z = data + cap * 2;
-
-  triangles->b_x = data + cap * 3;
-  triangles->b_y = data + cap * 4;
-  triangles->b_z = data + cap * 5;
-
-  triangles->c_x = data + cap * 6;
-  triangles->c_y = data + cap * 7;
-  triangles->c_z = data + cap * 8;
-
-  triangles->aos = (Triangle_AOS *)(data + cap * 9);
-}
-
-internal void triangles_destroy(Triangles *triangles) {
-  mem_free(triangles->a_x, TRIANGLES_ALLOCATION_SIZE(triangles->cap), triangles->allocator);
-}
-
-internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
-  if (triangles->len + v.len >= triangles->cap) {
-    isize new_cap = max(triangles->cap * 2, 8);
-    if (triangles->cap + v.len > new_cap) {
-      new_cap  = triangles->cap * 2 + ((v.len + 7) / 8) * 8;
-    }
-    assert(new_cap % 8 == 0);
-    f32 *new_data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(new_cap), 32, triangles->allocator));
-
-    mem_tcopy(new_data + new_cap * 0, triangles->a_x, triangles->len);
-    mem_tcopy(new_data + new_cap * 1, triangles->a_y, triangles->len);
-    mem_tcopy(new_data + new_cap * 2, triangles->a_z, triangles->len);
-
-    mem_tcopy(new_data + new_cap * 3, triangles->b_x, triangles->len);
-    mem_tcopy(new_data + new_cap * 4, triangles->b_y, triangles->len);
-    mem_tcopy(new_data + new_cap * 5, triangles->b_z, triangles->len);
-
-    mem_tcopy(new_data + new_cap * 6, triangles->c_x, triangles->len);
-    mem_tcopy(new_data + new_cap * 7, triangles->c_y, triangles->len);
-    mem_tcopy(new_data + new_cap * 8, triangles->c_z, triangles->len);
-
-    mem_tcopy((Triangle_AOS *)(new_data + new_cap * 9), triangles->aos, triangles->len);
-
-    triangles->a_x = new_data + new_cap * 0;
-    triangles->a_y = new_data + new_cap * 1;
-    triangles->a_z = new_data + new_cap * 2;
-
-    triangles->b_x = new_data + new_cap * 3;
-    triangles->b_y = new_data + new_cap * 4;
-    triangles->b_z = new_data + new_cap * 5;
-
-    triangles->c_x = new_data + new_cap * 6;
-    triangles->c_y = new_data + new_cap * 7;
-    triangles->c_z = new_data + new_cap * 8;
-
-    triangles->aos = (Triangle_AOS *)(new_data + new_cap * 9);
-
-    triangles->cap = new_cap;
-  }
-
-  slice_iter_v(v, t, i, {
-    triangles->a_x[triangles->len + i] = t.a.x;
-    triangles->a_y[triangles->len + i] = t.a.y;
-    triangles->a_z[triangles->len + i] = t.a.z;
-
-    triangles->b_x[triangles->len + i] = t.b.x;
-    triangles->b_y[triangles->len + i] = t.b.y;
-    triangles->b_z[triangles->len + i] = t.b.z;
-
-    triangles->c_x[triangles->len + i] = t.c.x;
-    triangles->c_y[triangles->len + i] = t.c.y;
-    triangles->c_z[triangles->len + i] = t.c.z;
-
-    Vec3 edge1 = vec3_sub(vec3(t.b.x, t.b.y, t.b.z), vec3(t.a.x, t.a.y, t.a.z));
-    Vec3 edge2 = vec3_sub(vec3(t.c.x, t.c.y, t.c.z), vec3(t.a.x, t.a.y, t.a.z));
-
-    Vec2 delta_uv1 = vec2_sub(t.tex_coords_b, t.tex_coords_a);
-    Vec2 delta_uv2 = vec2_sub(t.tex_coords_c, t.tex_coords_a);
-
-    f32 d = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
-    if (abs_f32(d) < EPSILON) {
-      d = 1.0f;
-    }
-
-    f32 inv_d = 1.0f / d;
-
-    Vec3 tangent   = vec3_normalize(vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d));
-    Vec3 bitangent = vec3_normalize(vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d));
-
-    triangles->aos[triangles->len + i] = (Triangle_AOS) {
-      .shader       = t.shader,
-      .normal       = vec3_normalize(vec3_cross(edge1, edge2)),
-      .normal_a     = t.normal_a,
-      .normal_b     = t.normal_b,
-      .normal_c     = t.normal_c,
-      .tex_coords_a = t.tex_coords_a,
-      .tex_coords_b = t.tex_coords_b,
-      .tex_coords_c = t.tex_coords_c,
-      .tangent      = tangent,
-      .bitangent    = bitangent,
-    };
-  });
-  triangles->len += v.len;
-}
-
-internal inline f32 min_f32x8(f32x8 vec, f32 epsilon, i32 *index) {
-  // Set elements less than epsilon to +∞
-  f32x8 inf = _mm256_set1_ps(F32_INFINITY);
-  f32x8 nan_mask = _mm256_cmp_ps(vec, _mm256_set1_ps(epsilon), _CMP_GT_OQ);
-  f32x8 sanitized_vec = _mm256_blendv_ps(inf, vec, nan_mask);
-
-  f32x8 min1 = _mm256_min_ps(sanitized_vec, _mm256_permute_ps(sanitized_vec, 0b10110001));
-  f32x8 min2 = _mm256_min_ps(min1, _mm256_permute_ps(min1, 0b01001110));
-  f32x8 min3 = _mm256_min_ps(min2, _mm256_permute2f128_ps(min2, min2, 0b00000001));
+  distances =  _mm256_blendv_ps(distances, _mm256_set1_ps(F32_INFINITY), hit_mask);
   
-  f32 min_value = _mm256_cvtss_f32(min3);
+  i32 idx;
+  f32 new_min = min_f32x8(distances, EPSILON, &idx);
+  if (new_min < hit->distance) {
+    hit->distance = new_min;
 
-  f32x8 cmp  = _mm256_cmp_ps(sanitized_vec, min3, _CMP_EQ_OQ);
-  i32   mask = _mm256_movemask_ps(cmp);
-  *index     = __builtin_ctz(mask);
+    i32 s = idx + offset * 8;
 
-  return min_value;
+    hit->point  = vec3_add(ray->position, vec3_scale(ray->direction, hit->distance));
+    hit->normal = vec3_sub(hit->point, vec3(spheres->position_x[s], spheres->position_y[s], spheres->position_z[s]));
+    hit->normal = vec3_scale(hit->normal, 1.0f / spheres->radius[s]);
+    hit->shader = spheres->shader[s];
+  }
 }
 
 internal inline b8 ray_triangles_hit_8(
-  Ray       *ray,
-  Triangles *triangles,
-  isize      offset,
-  Hit       *hit
+  Ray       const *ray,
+  Triangles const *triangles,
+  isize            offset,
+  Hit             *hit
 ) {
   const f32x8 epsilon  = _mm256_set1_ps( EPSILON);
   const f32x8 nepsilon = _mm256_set1_ps(-EPSILON);
@@ -387,72 +228,7 @@ internal inline u8 ray_aabbs_hit_8(
   return _mm256_movemask_ps(_mm256_cmp_ps(t_minv, t_maxv, _CMP_LT_OQ));
 }
 
-internal f32 aabb_surface_area(AABB *aabb) {
-  f32 x = aabb->max.x - aabb->min.x;
-  f32 y = aabb->max.y - aabb->min.y;
-  f32 z = aabb->max.z - aabb->min.z;
-  return 2.0f * (x * y + y * z + z * x);
-}
-
-internal void aabb_union(AABB *a, AABB *b, AABB *c) {
-  c->min = vec3(
-    min(a->min.x, b->min.x),
-    min(a->min.y, b->min.y),
-    min(a->min.z, b->min.z),
-  );
-  c->max = vec3(
-    max(a->max.x, b->max.x),
-    max(a->max.y, b->max.y),
-    max(a->max.z, b->max.z),
-  );
-}
-
-internal void aabb_triangle(Triangle *triangle, AABB *aabb) {
-  aabb->min = vec3(
-    min(triangle->a.x, min(triangle->b.x, triangle->c.x)) - EPSILON,
-    min(triangle->a.y, min(triangle->b.y, triangle->c.y)) - EPSILON,
-    min(triangle->a.z, min(triangle->b.z, triangle->c.z)) - EPSILON,
-  );
-  aabb->max = vec3(
-    max(triangle->a.x, max(triangle->b.x, triangle->c.x)) + EPSILON,
-    max(triangle->a.y, max(triangle->b.y, triangle->c.y)) + EPSILON,
-    max(triangle->a.z, max(triangle->b.z, triangle->c.z)) + EPSILON,
-  );
-}
-
-internal void aabb_triangle_slice(Triangle_Slice triangles, AABB *aabb) {
-  *aabb = (AABB) {0};
-
-  slice_iter_v(triangles, t, i, {
-    AABB t_aabb;
-    aabb_triangle(&t, &t_aabb);
-    if (!i) {
-      *aabb = t_aabb;
-    }
-    aabb_union(aabb, &t_aabb, aabb);
-  });
-}
-
-internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
-  assert(axis <  3);
-  assert(axis >= 0);
-  sort_slice_by(
-    slice,
-    i,
-    j,
-    ({
-      AABB aabb_i, aabb_j;
-      aabb_triangle(&IDX(slice, i), &aabb_i);
-      aabb_triangle(&IDX(slice, j), &aabb_j);
-
-      aabb_i.min.data[axis] < aabb_j.min.data[axis];
-    })
-  );
-}
-
-#include "bvh.c"
-
-internal void ray_bvh_node_hit(Ray *ray, BVH *bvh, BVH_Node *node, Hit *hit, i32 depth) {
+internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit *hit, i32 depth) {
   u8 aabb_hits = ray_aabbs_hit_8(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
   u8 mask      = 1;
 
@@ -460,210 +236,49 @@ internal void ray_bvh_node_hit(Ray *ray, BVH *bvh, BVH_Node *node, Hit *hit, i32
     if (aabb_hits & mask) {
       BVH_Index idx = node->children[offset];
       if (idx.leaf) {
-        ray_triangles_hit_8(ray, &bvh->triangles, idx.index, hit);
+        ray_triangles_hit_8(ray, &scene->triangles, idx.index, hit);
       } else {
-        ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, idx.index), hit, depth + 1);
+        ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, idx.index), hit, depth + 1);
       }
     }
     mask <<= 1;
   }
 }
 
-internal void ray_bvh_hit(Ray *ray, BVH *bvh, Hit *hit) {
-  if (bvh->root.leaf) {
-    ray_triangles_hit_8(ray, &bvh->triangles, bvh->root.index, hit);
-  } else {
-    ray_bvh_node_hit(ray, bvh, &IDX(bvh->nodes, bvh->root.index), hit, 1);
+internal inline void ray_spheres_hit(Ray *ray, Spheres *spheres, Hit *hit) {
+  for_range(offset, 0, (spheres->len + 7) / 8) {
+    ray_spheres_hit_8(ray, spheres, offset * 8, hit);
   }
 }
 
-internal BVH_Index bvh_build(BVH *bvh, Triangle_Slice triangles) {
-  if (triangles.len <= 8) {
-    BVH_Index idx = { .index = bvh->triangles.len, .leaf = true, };
-    triangles_append(&bvh->triangles, triangles);
-    while (bvh->triangles.len % 8) {
-      bvh->triangles.len += 1;
-    }
-    assert(bvh->triangles.len <= bvh->triangles.cap);
-    return idx;
-  }
-
-  Triangle_Slice slices[8] = { triangles, };
-  isize n_slices = 1;
-
-  while (n_slices < 8) {
-    isize _n_slices = n_slices;
-    for_range(slice_i, 0, _n_slices) {
-      Triangle_Slice slice = slices[slice_i];
-      if (slice.len <= 8) {
-        n_slices += 1;
-        continue;
-      }
-      f32 min_surface_area = F32_INFINITY;
-      i32 best_axis;
-      for_range(axis, 0, 3) {
-        sort_triangle_slice(slice, axis);
-        AABB a, b;
-        aabb_triangle_slice(slice_end(slice,   slice.len / 2), &a);
-        aabb_triangle_slice(slice_start(slice, slice.len / 2), &b);
-        f32 surface_area = aabb_surface_area(&a) + aabb_surface_area(&b);
-        if (surface_area <= min_surface_area) {
-          min_surface_area = surface_area;
-          best_axis        = axis;
-        }
-      }
-
-      if (best_axis != 2) {
-        sort_triangle_slice(slice, best_axis);
-      }
-
-      slices[slice_i ] = slice_end(slice,   slice.len / 2);
-      slices[n_slices] = slice_start(slice, slice.len / 2);
-      n_slices += 1;
-    }
-  }
-
-  BVH_Node node = {0};
-  BVH_Index index = (BVH_Index) { .index = bvh->nodes.len, .leaf = false, };
-  vector_append(&bvh->nodes, node);
-
-  slice_iter_v(slice_array(Slice(Triangle_Slice), slices), tris, i, {
-    AABB aabb;
-    aabb_triangle_slice(tris, &aabb);
-
-    node.mins.x[i] = aabb.min.x;
-    node.mins.y[i] = aabb.min.y;
-    node.mins.z[i] = aabb.min.z;
-
-    node.maxs.x[i] = aabb.max.x;
-    node.maxs.y[i] = aabb.max.y;
-    node.maxs.z[i] = aabb.max.z;
-
-    node.children[i] = bvh_build(bvh, tris);
-  });
-
-  IDX(bvh->nodes, index.index) = node;
-  return index;
-}
-
-internal void bvh_init(BVH *bvh, Triangle_Slice src_triangles, Allocator allocator) {
-  vector_init(&bvh->nodes, 0, 8, allocator);
-  triangles_init(&bvh->triangles, 0, src_triangles.len * 8, allocator);
-  bvh->root = bvh_build(bvh, src_triangles);
-}
-
-Image background_image = {0};
-
-internal inline Color3 srgb_to_linear(Color3 x) {
-  return vec3(
-    pow_f32((x.r + 0.055f) / 1.055f, 2.4),
-    pow_f32((x.g + 0.055f) / 1.055f, 2.4),
-    pow_f32((x.b + 0.055f) / 1.055f, 2.4),
-  );
-}
-
-internal inline void ray_triangles_hit(Ray *ray, Triangles *triangles, Hit *hit) {
+internal inline void ray_triangles_hit(Ray const *ray, Triangles const *triangles, Hit *hit) {
   for_range(offset, 0, (triangles->len + 7) / 8) {
     ray_triangles_hit_8(ray, triangles, offset * 8, hit);
   }
 }
 
-internal inline void ray_spheres_hit(Ray *ray, Spheres *spheres, Hit *hit) {
-  for_range(offset, 0, (spheres->len + 7) / 8) {
-    f32x8 distances = ray_spheres_hit_8(ray, spheres, offset * 8);
-  
-    i32 idx;
-    f32 new_min = min_f32x8(distances, EPSILON, &idx);
-    if (new_min < hit->distance) {
-      hit->distance = new_min;
-
-      i32 s = idx + offset * 8;
-
-      hit->point  = vec3_add(ray->position, vec3_scale(ray->direction, hit->distance));
-      hit->normal = vec3_sub(hit->point, vec3(spheres->position_x[s], spheres->position_y[s], spheres->position_z[s]));
-      hit->normal = vec3_scale(hit->normal, 1.0f / spheres->radius[s]);
-      hit->shader = spheres->shader[s];
-    }
+internal void ray_scene_hit(Ray *ray, Scene const *scene, Hit *hit) {
+#if 0
+  ray_triangles_hit(ray, &scene->triangles, hit);
+#else
+  if (scene->bvh.root.leaf) {
+    ray_triangles_hit_8(ray, &scene->triangles, scene->bvh.root.index, hit);
+  } else {
+    ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, scene->bvh.root.index), hit, 1);
   }
+#endif
 }
 
-internal Vec3 sample_texture_nearest(Image *texture, Vec2 tex_coords) {
-  isize u = tex_coords.x * texture->width;
-  if (u >= texture->width) {
-    u = texture->width - 1;
-  }
-  isize v = (1 - tex_coords.y) * texture->height;
-  if (v >= texture->height) {
-    v = texture->height - 1;
-  }
-
-  return vec3(
-    IDX(texture->pixels, texture->components * (u + texture->width * v) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u + texture->width * v) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u + texture->width * v) + 2) / 255.0f,
-  );
-}
-
-internal f32 floor_f32(f32 x) {
-  return (isize)x;
-}
-
-internal Vec3 sample_texture_bilinear(Image *texture, Vec2 tex_coords) {
-  f32 px = tex_coords.x * (texture->width - 1);
-  f32 py = (1.0f - tex_coords.y) * (texture->height - 1);
-
-  isize u = (isize)floor_f32(px);
-  isize v = (isize)floor_f32(py);
-
-  f32 a = px - u;
-  f32 b = py - v;
-
-  isize u2 = (u + 1 < texture->width)  ? u + 1 : u;
-  isize v2 = (v + 1 < texture->height) ? v + 1 : v;
-
-  Vec3 c00 = vec3(
-    IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->width * v ) + 2) / 255.0f,
-  );
-  Vec3 c10 = vec3(
-    IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->width * v ) + 2) / 255.0f,
-  );
-  Vec3 c01 = vec3(
-    IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->width * v2) + 2) / 255.0f,
-  );
-  Vec3 c11 = vec3(
-    IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->width * v2) + 2) / 255.0f,
-  );
-
-  Vec3 c0 = vec3_lerp(c00, c10, a);
-  Vec3 c1 = vec3_lerp(c01, c11, a);
-  return vec3_lerp(c0, c1, b);
-}
-
-Vec3 sample_background(Vec3 dir) {
-  f32 invPi    = 1.0f / PI;
-  f32 invTwoPi = 1.0f / (2.0f * PI);
-
-  f32 u = 0.5f + atan2_f32(dir.x, dir.z) * invTwoPi;
-  f32 v = 0.5f - asin_f32(-dir.y) * invPi;
-
-  Vec3 color = sample_texture(&background_image, vec2(u, v));
-  return srgb_to_linear(color);
-}
-
-Color3 cast_ray(BVH *bvh, Ray ray) {
+internal Color3 cast_ray(Scene const *scene, Ray ray, isize max_bounces) {
   Color3 accumulated_tint = vec3(1, 1, 1);
   Color3 emission         = {0};
-  for_range(i, 0, MAX_BOUNCES) {
+
+  Shader_Output shader_output = {0};
+  Shader_Input  shader_input  = {0};
+
+  for_range(i, 0, max_bounces) {
     Hit hit = { .distance = F32_INFINITY, };
-    ray_bvh_hit(&ray, bvh, &hit);
+    ray_scene_hit(&ray, scene, &hit);
     if (hit.distance != F32_INFINITY) {
       if (
         vec3_dot(hit.normal_geo, ray.direction) > 0 ||
@@ -673,7 +288,7 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
         continue;
       }
 
-      Shader_Input shader_input = {
+      shader_input = (Shader_Input) {
         .direction  = ray.direction,
         .normal     = vec3_normalize(hit.normal),
         .normal_geo = hit.normal_geo,
@@ -682,7 +297,7 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
         .position   = hit.point,
         .tex_coords = hit.tex_coords,
       };
-      Shader_Output shader_output = {0};
+      shader_output = (Shader_Output) {0};
 
       hit.shader.proc(hit.shader.data, &shader_input, &shader_output);
 
@@ -703,7 +318,7 @@ Color3 cast_ray(BVH *bvh, Ray ray) {
       f32 position_bias = (0.5f - (vec3_dot(hit.normal_geo, shader_output.direction) < 0)) * 2.0f * EPSILON;
       ray.position = vec3_add(hit.point, vec3_scale(hit.normal_geo, position_bias));
     } else {
-      return vec3_add(vec3_mul(sample_background(ray.direction), accumulated_tint), emission);
+      return vec3_add(vec3_mul(scene->background.proc(scene->background.data, ray.direction), accumulated_tint), emission);
     }
   }
   return emission;
@@ -715,7 +330,7 @@ internal inline f32 aces_f32(f32 x) {
   const f32 c = 2.43;
   const f32 d = 0.59;
   const f32 e = 0.14;
-  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+  return (x * (a * x + b)) / (x * (c * x + d) + e);
 }
 
 internal inline f32 reinhard_f32(f32 x) {
@@ -725,9 +340,9 @@ internal inline f32 reinhard_f32(f32 x) {
 
 internal inline Color3 tonemap(Color3 x) {
   return vec3(
-    clamp(x.r, 0, 1),
-    clamp(x.g, 0, 1),
-    clamp(x.b, 0, 1),
+    aces_f32(x.r),
+    aces_f32(x.g),
+    aces_f32(x.b),
   );
 }
 
@@ -745,41 +360,42 @@ internal inline f32x8 hash12x8(Vec2x8 p) {
   return fract_f32x8((p3.x + p3.y + dot * 2.0f) * (p3.z + dot));
 }
 
-typedef struct {
-  Matrix_3x3 matrix;
-  Vec3       position;
-  f32        fov, focal_length;
-} Camera;
+extern void render_thread_proc(Rendering_Context *ctx) {
+  Camera camera = ctx->scene->camera;
 
-typedef struct {
-  Camera      camera;
-  Image       image;
-  BVH        *bvh;
-  _Atomic i32 threads_done, current_chunk;
-} Rendering_Context;
+  #define CHUNK_SIZE 32
 
-void render_thread_proc(rawptr arg) {
-  Rendering_Context *ctx = (Rendering_Context *)arg;
+  isize n_chunks, chunks_x, chunks_y, width, height, samples, max_bounces;
+  samples     = ctx->samples;
+  max_bounces = ctx->max_bounces;
+  width       = ctx->image.width;
+  height      = ctx->image.height;
+  chunks_x    = ((width  + CHUNK_SIZE - 1) / CHUNK_SIZE);
+  chunks_y    = ((height + CHUNK_SIZE - 1) / CHUNK_SIZE);
+  n_chunks    = chunks_x * chunks_y;
 
-  Camera camera = ctx->camera;
+  f32 inv_samples = 1.0f / samples;
+  f32 inv_width   = 1.0f / width;
+  f32 inv_height  = 1.0f / height;
+  f32 aspect      = (f32)width / (f32)height;
 
   loop {
-    isize c = atomic_fetch_add(&ctx->current_chunk, 1);
-    if (c >= N_CHUNKS) {
-      atomic_fetch_add(&ctx->threads_done, 1);
+    isize c = atomic_fetch_add(&ctx->_current_chunk, 1);
+    if (c >= n_chunks) {
+      atomic_fetch_add(&ctx->n_threads, -1);
       return;
     }
 
-    isize start_x = (c % CHUNKS_X) * CHUNK_SIZE;
-    isize start_y = (c / CHUNKS_X) * CHUNK_SIZE;
+    isize start_x = (c % chunks_x) * CHUNK_SIZE;
+    isize start_y = (c / chunks_x) * CHUNK_SIZE;
 
     for_range(y, start_y, start_y + CHUNK_SIZE) {
-      if (y >= HEIGHT) {
+      if (y >= height) {
         break;
       }
 
       for_range(x, start_x, start_x + CHUNK_SIZE) {
-        if (x >= WIDTH) {
+        if (x >= width) {
           break;
         }
 
@@ -787,7 +403,7 @@ void render_thread_proc(rawptr arg) {
 
         f32x8 sample_indices = { 0, 1, 2, 3, 4, 5, 6, 7, };
 
-        for_range(sample_batch, 0, (SAMPLES + 7) / 8) {
+        for_range(sample_batch, 0, (samples + 7) / 8) {
           f32x8 rand_a = hash12x8((Vec2x8) {
             .x = _mm256_set1_ps((f32)x * 50.0f) + sample_indices,
             .y = _mm256_set1_ps((f32)y),
@@ -798,11 +414,11 @@ void render_thread_proc(rawptr arg) {
           });
 
           Vec2x8 uvs = {
-            .x = ((f32)x + rand_a - 0.5) / WIDTH  - 0.5,
-            .y = ((f32)y + rand_b - 0.5) / HEIGHT - 0.5,
+            .x = ((f32)x + rand_a - 0.5) * 2.0f * inv_width  - 1.0f,
+            .y = ((f32)y + rand_b - 0.5) * 2.0f * inv_height - 1.0f,
           };
           Vec3x8 directions = {
-            .x =  uvs.x * ((f32)WIDTH / HEIGHT),
+            .x =  uvs.x * aspect,
             .y = -uvs.y,
             .z = _mm256_set1_ps(-camera.focal_length),
           };
@@ -832,610 +448,110 @@ void render_thread_proc(rawptr arg) {
           _mm256_store_ps(directions_z, directions.z);
 
           for_range(sample, 0, 8) {
-            if (sample + sample_batch * 8 >= SAMPLES) {
+            if (sample + sample_batch * 8 >= samples) {
               break;
             }
             Ray r = {
               .position  = camera.position,
               .direction = vec3(directions_x[sample], directions_y[sample], directions_z[sample]),
             };
-            color = vec3_add(color, cast_ray(ctx->bvh, r));
+            color = vec3_add(color, cast_ray(ctx->scene, r, max_bounces));
           }
           sample_indices += _mm256_set1_ps(8);
         }
 
-        color = vec3_scale(color, 1.0f / SAMPLES);
-        color = tonemap(color);
+        color = vec3_scale(color, inv_samples);
+        // color = tonemap(color);
         color = vec3(
-          pow_f32(color.r, 1.0f / 2.2f),
-          pow_f32(color.g, 1.0f / 2.2f),
-          pow_f32(color.b, 1.0f / 2.2f),
+          clamp(color.r, 0, 1),
+          clamp(color.g, 0, 1),
+          clamp(color.b, 0, 1),
+        );
+        color = vec3(
+          linear_to_srgb(color.r),
+          linear_to_srgb(color.g),
+          linear_to_srgb(color.b),
         );
         color = vec3_scale(color, 255.999f);
 
-        IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 0) = (u8)color.data[0];
-        IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 1) = (u8)color.data[1];
-        IDX(ctx->image.pixels, 3 * (x + y * WIDTH) + 2) = (u8)color.data[2];
+        IDX(ctx->image.pixels, ctx->image.components * (x + y * ctx->image.stride) + 0) = (u8)color.data[0];
+        IDX(ctx->image.pixels, ctx->image.components * (x + y * ctx->image.stride) + 1) = (u8)color.data[1];
+        IDX(ctx->image.pixels, ctx->image.components * (x + y * ctx->image.stride) + 2) = (u8)color.data[2];
       }
     }
   }
 }
 
-internal void load_texture(String path, Image *texture) {
-  b8 ok = png_load_bytes(
-    unwrap_err(read_entire_file_path(path, context.allocator)),
-    texture,
-    context.allocator
-  );
-  if (!ok) {
-    fmt_eprintflnc("Failed to load texture: '%S'", path);
-    process_exit(1);
-  }
-}
+extern void lightmap_bake(Image const *lightmap, Scene const *scene, isize samples) {
+  assert(lightmap->pixel_type == PT_u8);
+  assert(lightmap->components >= 3);
 
-internal inline Vec3 sample_cosine_hemisphere() {
-  f32 angle    = rand_f32() * 2 * PI;
-  f32 distance = sqrt_f32(rand_f32());
-  Vec3 v = vec3(
-    .x = sin_f32(angle) * distance,
-    .y = cos_f32(angle) * distance,
-  );
-  v.z = sqrt_f32(1 - distance * distance);
-  return v;
-}
+  for_range(i, 0, scene->triangles.len) {
+    Triangle_AOS aos = scene->triangles.aos[i];
+    i32 min_x = min(aos.tex_coords_a.x, min(aos.tex_coords_b.x, aos.tex_coords_c.x)) * lightmap->width;
+    i32 max_x = max(aos.tex_coords_a.x, max(aos.tex_coords_b.x, aos.tex_coords_c.x)) * lightmap->width;
+    i32 min_y = min(aos.tex_coords_a.y, min(aos.tex_coords_b.y, aos.tex_coords_c.y)) * lightmap->height;
+    i32 max_y = max(aos.tex_coords_a.y, max(aos.tex_coords_b.y, aos.tex_coords_c.y)) * lightmap->height;
 
-internal inline Vec3 normal_map_apply(Image *normal_map, f32 normal_map_strength, Shader_Input const *input) {
-  Vec3 normal = input->normal;
-  if (normal_map) {
-    Vec3 v = sample_texture(normal_map, input->tex_coords);
-         v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
+    Vec2 p0 = vec2_mul(aos.tex_coords_a, vec2(lightmap->width, lightmap->height));
+    Vec2 p1 = vec2_mul(aos.tex_coords_b, vec2(lightmap->width, lightmap->height));
+    Vec2 p2 = vec2_mul(aos.tex_coords_c, vec2(lightmap->width, lightmap->height));
 
-    Vec3 t = input->tangent;
-    Vec3 b = input->bitangent;
-    Vec3 n = input->normal;
-
-    f32 s = normal_map_strength;
-
-    normal = vec3_normalize(
-      vec3(
-        .x = s * (v.x * t.x + v.y * b.x + v.z * n.x) + n.x * (1 - s),
-        .y = s * (v.x * t.y + v.y * b.y + v.z * n.y) + n.y * (1 - s),
-        .z = s * (v.x * t.z + v.y * b.z + v.z * n.z) + n.z * (1 - s),
-      )
-    );
-  }
-
-  return normal;
-}
-
-internal inline void basis(Vec3 view, Vec3 normal, Vec3 *tangent, Vec3 *bitangent) {
-  if (abs_f32(vec3_dot(normal, view)) < 0.999f) {
-    *tangent = vec3_normalize(vec3_cross(normal, view));
-  } else if (abs_f32(vec3_dot(normal, vec3(0, 1, 0))) < 0.95f) {
-    *tangent = vec3_normalize(vec3_cross(normal, vec3(0, 1, 0)));
-  } else {
-    *tangent = vec3_normalize(vec3_cross(normal, vec3(1, 0, 0)));
-  }
-  *bitangent = vec3_cross(normal, *tangent);
-}
-
-internal inline Color3 disney_calculate_sheen_tint(Color3 base_color) {
-  f32 luminance = vec3_dot(vec3(0.3f, 0.6f, 1.0f), base_color);
-  return (luminance > 0.0f) ? vec3_scale(base_color, (1.0f / luminance)) : vec3(1, 1, 1);
-}
-
-internal inline f32 disney_fresnel_schlick_weight(f32 cos_theta) {
-  f32 m = 1 - cos_theta;
-  return m * m * m * m * m;
-}
-
-internal inline Vec3 disney_evaluate_sheen(f32 sheen, Color3 base_color, f32 sheen_tint, f32 h_dot_l) {
-  if (sheen <= 0.0f) {
-    return vec3(0);
-  }
-
-  Vec3 tint = disney_calculate_sheen_tint(base_color);
-  return vec3_scale(vec3_lerp(vec3(1, 1, 1), tint, sheen_tint), sheen * disney_fresnel_schlick_weight(h_dot_l));
-}
-
-enum {
-  PBR_Type_Metal,
-  PBR_Type_Diffuse,
-  // PBR_Type_Dielectric,
-};
-
-typedef struct {
-  Vec3   base_color, emission;
-  f32    roughness, metalness, normal_map_strength, sheen, sheen_tint, anisotropic_aspect;
-  Image *texture_albedo;
-  Image *texture_normal;
-  Image *texture_metal_roughness;
-  Image *texture_emission;
-} PBR_Shader_Data;
-
-internal void pbr_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
-
-  Color3 albedo = data->base_color;
-  if (data->texture_albedo) {
-    albedo = vec3_mul(data->base_color, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
-  }
-  output->tint = albedo;
-
-  Color3 emmission = data->emission;
-  if (data->texture_emission) {
-    emmission = vec3_mul(emmission, srgb_to_linear(sample_texture(data->texture_emission, input->tex_coords)));
-  }
-  output->emission = emmission;
-
-  f32 metalness = data->metalness;
-  f32 roughness = data->roughness;
-  if (data->texture_metal_roughness) {
-    Vec3 mr = sample_texture(data->texture_metal_roughness, input->tex_coords);
-    metalness *= mr.b;
-    roughness *= mr.g;
-  }
-
-  Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
-
-  if (rand_f32() < metalness) {
-    Vec3 dir          = vec3_reflect(input->direction, normal);
-         dir          = vec3_add(dir, vec3_scale(rand_vec3(), roughness));
-    output->direction = vec3_normalize(dir);
-  } else {
-    output->direction = vec3_normalize(vec3_add(rand_vec3(), normal));
-  }
-}
-
-internal inline f32 luminance(Vec3 x) {
-	return vec3_dot(x, vec3(0.2126f, 0.7152f, 0.0722f));
-}
-
-internal inline f32 fresnel_schlick_f32(f32 f0, f32 f90, f32 theta) {
-  return f0 + (f90 - f0) * pow_f32(1 - theta, 5);
-}
-
-internal inline Vec3 fresnel_schlick_vec3(Vec3 f0, f32 f90, f32 theta) {
-  return vec3_add(f0, vec3_scale(vec3_sub(vec3_broadcast(f90), f0), pow_f32(1 - theta, 5)));
-}
-
-internal inline f32 distribution_GGX(f32 roughness, f32 NoH, f32 k) {
-  f32 a2 = roughness * roughness;
-  return a2 / (PI * pow_f32((NoH * NoH) * (a2 * a2 - 1) + 1, k));
-}
-
-internal inline f32 smith_G(f32 NDotV, f32 alpha2) {
-  f32 a = alpha2 * alpha2;
-  f32 b = NDotV  * NDotV;
-  return (2.0 * NDotV) / (NDotV + sqrt_f32(a + b - a * b));
-}
-
-internal inline f32 geometry_term(f32 NoL, f32 NoV, f32 roughness) {
-  f32 a2 = roughness * roughness;
-  f32 G1 = smith_G(NoV, a2);
-  f32 G2 = smith_G(NoL, a2);
-  return G1 * G2;
-}
-
-internal inline Vec3 sample_GGX_VNDF(Vec3 V, f32 ax, f32 ay) {
-  Vec3 Vh = vec3_normalize(vec3(ax * V.x, ay * V.y, V.z));
-
-  f32 lensq = Vh.x * Vh.x + Vh.y * Vh.y;
-  Vec3 T1 = lensq > 0 ? vec3_scale(vec3(-Vh.y, Vh.x, 0), 1.0f / sqrt_f32(lensq)) : vec3(1, 0, 0);
-  Vec3 T2 = vec3_cross(Vh, T1);
-
-  f32 r   = sqrt_f32(rand_f32());
-  f32 phi = 2.0 * PI * rand_f32();
-  f32 t1  = r * cos_f32(phi);
-  f32 t2  = r * sin_f32(phi);
-  f32 s   = 0.5 * (1.0 + Vh.z);
-  t2      = (1.0 - s) * sqrt_f32(1.0 - t1 * t1) + s * t2;
-
-  Vec3 Nh = vec3_add(
-    vec3_add(vec3_scale(T1, t1), vec3_scale(T2, t2)),
-    vec3_scale(Vh, sqrt_f32(max(0.0, 1.0 - t1 * t1 - t2 * t2)))
-  );
-
-  return vec3_normalize(vec3(ax * Nh.x, ay * Nh.y, max(0.0, Nh.z)));
-}
-
-internal inline f32 pdf_GGX_VNDF(f32 NoH, f32 NoV, f32 roughness) {
- 	f32 D  = distribution_GGX(roughness, NoH, 2);
-  f32 G1 = smith_G(NoV, roughness * roughness);
-  return (D * G1) / max(0.00001f, 4.0f * NoV);
-}
-
-internal inline Vec3 disney_eval_diffuse(Color3 base_color, f32 NoL, f32 NoV, f32 LoH, f32 roughness) {
-  f32 FD90 = 0.5f + 2 * roughness * LoH * LoH;
-  f32 a = fresnel_schlick_f32(1.0f, FD90, NoL);
-  f32 b = fresnel_schlick_f32(1.0f, FD90, NoV);
-
-  return vec3_scale(base_color, (a * b / PI));
-}
-
-internal inline Vec3 disney_eval_specular(f32 roughness, Vec3 F, f32 NoH, f32 NoV, f32 NoL) {
-  f32 D = distribution_GGX(roughness, NoH, 2);
-  f32 G = geometry_term(NoL, NoV, roughness);
-
-  return vec3_scale(F, D * G / (4 * NoL * NoV));
-}
-
-internal inline f32 shadowed_f90(Vec3 f0) {
-	const float t = 1.0f / 0.04f;
-	return min(1.0f, t * luminance(f0));
-}
-
-typedef struct {
-  f32  roughness, metalness, sheen, sheen_tint, anisotropic_aspect;
-  Vec3 base_color;
-} Disney_BRDF_Data;
-
-Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir) {
-  f32  aspect       = data->anisotropic_aspect;
-  f32  alpha_x      = (data->roughness * data->roughness) / aspect;
-  f32  alpha_y      = (data->roughness * data->roughness) * aspect;
-  Vec3 micro_normal = sample_GGX_VNDF(in_dir, alpha_x, alpha_y);
-
-  Vec3 f0      = vec3_lerp(vec3_broadcast(0.04f), data->base_color, data->metalness);
-	Vec3 fresnel = fresnel_schlick_vec3(f0, shadowed_f90(f0), vec3_dot(in_dir, micro_normal));
-
-  f32 diffuse_weight  = 1 - data->metalness;
-  f32 specular_weight = luminance(fresnel);
-  f32 inverse_weight  = 1 / (diffuse_weight + specular_weight);
-
-  diffuse_weight  *= inverse_weight;
-  specular_weight *= inverse_weight;
-  
-  Vec4 brdf = vec4(0);
-  if (rand_f32() < diffuse_weight) {
-    *out_dir = sample_cosine_hemisphere();
-    micro_normal = vec3_normalize(vec3_add(*out_dir, in_dir));
+    f32 denom = (p1.y - p2.y) * (p0.x - p2.x) + (p2.x - p1.x) * (p0.y - p2.y);
     
-    f32 NoL = out_dir->z;
-    f32 NoV = in_dir.z;
-    if (NoL <= 0 || NoV <= 0) {
-      return vec4(0);
-    }
-    f32 LoH = vec3_dot(*out_dir, micro_normal);
-    f32 pdf = NoL / PI;
-    
-    Vec3 diff = vec3_mul(disney_eval_diffuse(data->base_color, NoL, NoV, LoH, data->roughness), vec3_sub(vec3(1, 1, 1), fresnel));
-         diff = vec3_add(diff, disney_evaluate_sheen(data->sheen, data->base_color, data->sheen_tint, LoH));
-    brdf = vec4(
-      diff.r * NoL,
-      diff.g * NoL,
-      diff.b * NoL,
-      diffuse_weight * pdf
-    );
-  } else {
-    *out_dir = vec3_reflect(vec3_scale(in_dir, -1), micro_normal);
-    
-    f32 NoL = out_dir->z;
-    f32 NoV = in_dir.z;
-    if (NoL <= 0 || NoV <= 0) {
-      return vec4(0);
-    }
-    f32 NoH = min(micro_normal.z, 0.99f);
-    f32 pdf = pdf_GGX_VNDF(NoH, NoV, data->roughness);
-    
-    Vec3 spec = disney_eval_specular(data->roughness, fresnel, NoH, NoV, NoL);
-    brdf = vec4(
-      spec.r * NoL,
-      spec.g * NoL,
-      spec.b * NoL,
-      specular_weight * pdf
-    );
-  }
+    for_range(y, min_y, max_y + 1) {
+      for_range(x, min_x, max_x + 1) {
+        Vec2 p = vec2(x, y);
+        
+        f32 w0 = ((p1.y - p2.y) * (p.x - p2.x) + (p2.x - p1.x) * (p.y - p2.y)) / denom;
+        f32 w1 = ((p2.y - p0.y) * (p.x - p2.x) + (p0.x - p2.x) * (p.y - p2.y)) / denom;
+        f32 w2 = 1.0f - w0 - w1;
+        
+        if (w0 >= -EPSILON && w1 >= -EPSILON && w2 >= -EPSILON) {
+          Vec3 position = vec3(
+            .x = scene->triangles.a_x[i] * w0 + scene->triangles.b_x[i] * w1 + scene->triangles.c_x[i] * w2,
+            .y = scene->triangles.a_y[i] * w0 + scene->triangles.b_y[i] * w1 + scene->triangles.c_y[i] * w2,
+            .z = scene->triangles.a_z[i] * w0 + scene->triangles.b_z[i] * w1 + scene->triangles.c_z[i] * w2,
+          );
+          Vec3 normal = vec3(
+            .x = scene->triangles.aos[i].normal_a.x * w0 + scene->triangles.aos[i].normal_b.x * w1 + scene->triangles.aos[i].normal_c.x * w2,
+            .y = scene->triangles.aos[i].normal_a.y * w0 + scene->triangles.aos[i].normal_b.y * w1 + scene->triangles.aos[i].normal_c.y * w2,
+            .z = scene->triangles.aos[i].normal_a.z * w0 + scene->triangles.aos[i].normal_b.z * w1 + scene->triangles.aos[i].normal_c.z * w2,
+          );
 
-  *out_dir = vec3_normalize(*out_dir);
+          Vec3 accumulated = {0};
 
-  return brdf;
-}
-
-internal void disney_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
-  Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
-
-  Vec3 base_color = data->base_color;
-  if (data->texture_albedo) {
-    base_color = vec3_mul(base_color, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
-  }
-
-  f32 roughness = data->roughness;
-  f32 metalness = data->metalness;
-
-  if (data->texture_metal_roughness) {
-    Vec3 mr = sample_texture(data->texture_metal_roughness, input->tex_coords);
-    roughness *= mr.g;
-    metalness *= mr.b;
-  }
-
-  roughness = clamp(roughness, 0.001f, 1);
-  // uhh there's reasons for this
-  if (metalness > 0.9f) {
-    metalness = 0.9f;
-  }
-  metalness /= 0.9f;
-
-  Color3 emmission = data->emission;
-  if (data->texture_emission) {
-    emmission = vec3_mul(emmission, srgb_to_linear(sample_texture(data->texture_emission, input->tex_coords)));
-  }
-  output->emission = emmission;
-
-  Vec3 t, b;
-  basis(input->direction, normal, &t, &b);
-  Matrix_3x3 tangent_to_world = matrix_3x3_from_basis(t, b, normal);
-  Matrix_3x3 world_to_tangent = matrix_3x3_transpose(tangent_to_world);
-
-  Disney_BRDF_Data brdf_data = {
-    .roughness          = roughness,
-    .metalness          = metalness,
-    .base_color         = base_color,
-    .sheen              = data->sheen,
-    .sheen_tint         = data->sheen_tint,
-    .anisotropic_aspect = data->anisotropic_aspect,
-  };
-  
-  Vec3 in_dir = matrix_3x3_mul_vec3(world_to_tangent, vec3_scale(input->direction, -1));
-  Vec4 brdf   = sample_disney_BRDF(&brdf_data, in_dir, &output->direction);
-
-  output->direction = matrix_3x3_mul_vec3(tangent_to_world, output->direction);
-
-  if (brdf.a > 0) {
-    output->tint = vec3(
-      brdf.r / brdf.a,
-      brdf.g / brdf.a,
-      brdf.b / brdf.a,
-    );
-  } else {
-    output->terminate = true;
-  }
-}
-
-internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_Output *output) {
-  PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
-
-  Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
-
-  // output->emission  = vec3_broadcast(normal.y * 0.5 + 0.5);
-  // output->emission  = vec3_broadcast(vec3_dot(normal, vec3(0, 1, 0)));
-  output->emission  = vec3_add(vec3_scale(normal, 0.5), vec3_broadcast(0.5f));
-  output->terminate = true;
-}
-
-i32 main() {
-  context.logger = (Logger) {0};
-
-  Image image = {
-    .components = 3,
-    .pixel_type = PT_u8,
-    .width      = WIDTH,
-    .height     = HEIGHT,
-  };
-  image.pixels = slice_make_aligned(Byte_Slice, WIDTH * HEIGHT * 3, 64, context.allocator);
-
-  Image texture_albedo          = {0};
-  Image texture_metal_roughness = {0};
-  Image texture_emission        = {0};
-  Image texture_normal          = {0};
-
-  load_texture(LIT("background.png"), &background_image);
-
-  load_texture(LIT("helmet_albedo.png"),   &texture_albedo);
-  load_texture(LIT("helmet_normal.png"),   &texture_normal);
-  load_texture(LIT("helmet_emission.png"), &texture_emission);
-  load_texture(LIT("helmet_mr.png"),       &texture_metal_roughness);
-
-  f32 angle    = PI * 0.125f;
-  f32 distance = 2;
-
-  Camera camera;
-  camera.position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
-  camera.matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
-  camera.fov          = PI / 2.0f;
-  camera.focal_length = 0.5f / atan_f32(camera.fov * 0.5f);
-
-  isize n_triangles = 0;
-
-  BVH bvh;
-
-  #if USE_CACHED_BVH
-    Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Read));
-    File_Info fi;
-    OS_Error err = file_stat(bvh_file, &fi);
-    assert(err == OSE_None);
-    Byte_Slice data = slice_make_aligned(Byte_Slice, fi.size, 32, context.allocator);
-    isize n_read = unwrap_err(file_read(bvh_file, data));
-    assert(n_read == fi.size);
-    b8 ok = bvh_load_bytes(data, &bvh);
-    assert(ok);
-
-    n_triangles = bvh.triangles.len;
-  #else
-    Byte_Slice data = unwrap_err(read_entire_file_path(LIT("helmet.obj"), context.allocator));
-    Obj_File   obj  = {0};
-    obj_load(bytes_to_string(data), &obj, context.allocator);
-
-    Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
-
-    n_triangles = obj.triangles.len;
-
-    Shader shader = {
-      .data = &(PBR_Shader_Data) {
-        .base_color              = vec3(1, 1, 1),
-        .emission                = vec3(1, 1, 1),
-        .roughness               = 1,
-        .metalness               = 1,
-        .normal_map_strength     = 0.5f,
-        .anisotropic_aspect      = 1, // sqrt_f32(1 - 0.9f * anisotropic)
-        .texture_albedo          = &texture_albedo,
-        .texture_metal_roughness = &texture_metal_roughness,
-        .texture_emission        = &texture_emission,
-        .texture_normal          = &texture_normal,
-      },
-      .proc = disney_shader_proc,
-    };
-
-    // Shader metal_shader = {
-    //   .data = &(PBR_Shader_Data) {
-    //     .albedo                  = vec3(0.9, 0.9, 0.9),
-    //     .roughness               = 0.2f,
-    //     .metalness               = 1,
-    //     .anisotropic_aspect      = 1,
-    //   },
-    //   .proc = disney_shader_proc,
-    // };
-    // Shader diffuse_shader = {
-    //   .data = &(PBR_Shader_Data) {
-    //     .albedo                  = vec3(0.5f, 0.95f, 0.45f),
-    //     .roughness               = 0.2f,
-    //     .metalness               = 0,
-    //     .anisotropic_aspect      = 1,
-    //   },
-    //   .proc = disney_shader_proc,
-    // };
-    // Shader mirror_shader = {
-    //   .data = &(PBR_Shader_Data) {
-    //     .albedo                  = vec3(1, 1, 1),
-    //     .roughness               = 0,
-    //     .metalness               = 1,
-    //     .anisotropic_aspect      = 1,
-    //   },
-    //   .proc = disney_shader_proc,
-    // };
-    // Shader red_shader = {
-    //   .data = &(PBR_Shader_Data) {
-    //     .albedo                  = vec3(0.95f, 0.25f, 0.25f),
-    //     .roughness               = 0.7f,
-    //     .metalness               = 0.3f,
-    //     .anisotropic_aspect      = 1,
-    //   },
-    //   .proc = disney_shader_proc,
-    // };
-
-    // shader = (Shader) {
-    //   .data = &(BRDF_Shader_Data) {
-    //     .tint       = vec3(0xdc / 255.0, 0x7c / 255.0, 0x47 / 255.0),
-    //     .roughness  = 0.001f,
-    //     .normal_map = &texture_normal,
-    //     .normal_map_strength = 1,
-    //   },
-    //   .proc = brdf_shader_proc,
-    // };
-
-    slice_iter_v(obj.triangles, t, i, {
-      IDX(triangles, i + n_triangles * 0) = (Triangle) {
-        .a            = t.a.position, // vec3_add(t.a.position, vec3(-1.5f, -1.5f, 0)),
-        .b            = t.b.position, // vec3_add(t.b.position, vec3(-1.5f, -1.5f, 0)),
-        .c            = t.c.position, // vec3_add(t.c.position, vec3(-1.5f, -1.5f, 0)),
-        .normal_a     = t.a.normal,
-        .normal_b     = t.b.normal,
-        .normal_c     = t.c.normal,
-        .tex_coords_a = t.a.tex_coords,
-        .tex_coords_b = t.b.tex_coords,
-        .tex_coords_c = t.c.tex_coords,
-        .shader       = shader,
-      };
-
-      // IDX(triangles, i + n_triangles * 1) = (Triangle) {
-      //   .a            = vec3_add(t.a.position, vec3(-1.5f, +1.5f, 0)),
-      //   .b            = vec3_add(t.b.position, vec3(-1.5f, +1.5f, 0)),
-      //   .c            = vec3_add(t.c.position, vec3(-1.5f, +1.5f, 0)),
-      //   .normal_a     = t.a.normal,
-      //   .normal_b     = t.b.normal,
-      //   .normal_c     = t.c.normal,
-      //   .tex_coords_a = t.a.tex_coords,
-      //   .tex_coords_b = t.b.tex_coords,
-      //   .tex_coords_c = t.c.tex_coords,
-      //   .shader       = diffuse_shader,
-      // };
-
-      // IDX(triangles, i + n_triangles * 2) = (Triangle) {
-      //   .a            = vec3_add(t.a.position, vec3(+1.5f, -1.5f, 0)),
-      //   .b            = vec3_add(t.b.position, vec3(+1.5f, -1.5f, 0)),
-      //   .c            = vec3_add(t.c.position, vec3(+1.5f, -1.5f, 0)),
-      //   .normal_a     = t.a.normal,
-      //   .normal_b     = t.b.normal,
-      //   .normal_c     = t.c.normal,
-      //   .tex_coords_a = t.a.tex_coords,
-      //   .tex_coords_b = t.b.tex_coords,
-      //   .tex_coords_c = t.c.tex_coords,
-      //   .shader       = mirror_shader,
-      // };
-
-      // IDX(triangles, i + n_triangles * 3) = (Triangle) {
-      //   .a            = vec3_add(t.a.position, vec3(+1.5f, +1.5f, 0)),
-      //   .b            = vec3_add(t.b.position, vec3(+1.5f, +1.5f, 0)),
-      //   .c            = vec3_add(t.c.position, vec3(+1.5f, +1.5f, 0)),
-      //   .normal_a     = t.a.normal,
-      //   .normal_b     = t.b.normal,
-      //   .normal_c     = t.c.normal,
-      //   .tex_coords_a = t.a.tex_coords,
-      //   .tex_coords_b = t.b.tex_coords,
-      //   .tex_coords_c = t.c.tex_coords,
-      //   .shader       = red_shader,
-      // };
-    });
-
-    n_triangles = triangles.len;
-
-    Timestamp bvh_start_time = time_now();
-    bvh_init(&bvh, triangles, context.allocator);
-    fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
-
-    Fd bvh_file = unwrap_err(file_open(LIT("test.bvh"), FP_Truncate | FP_Write | FP_Create));
-    Writer bvh_out = writer_from_handle(bvh_file);
-    bvh_save_writer(&bvh_out, &bvh);
-  #endif
-
-  fmt_printflnc("Width:     %d", WIDTH);
-  fmt_printflnc("Height:    %d", HEIGHT);
-  fmt_printflnc("Samples:   %d", SAMPLES);
-  fmt_printflnc("Bounces:   %d", MAX_BOUNCES);
-  if (USE_THREADS) {
-    fmt_printflnc("Threads:   %d", N_THREADS);
-  }
-  fmt_printflnc("BVH-Nodes: %d", bvh.nodes.len);
-  fmt_printflnc("Triangles: %d", n_triangles);
-
-  fmt_printlnc("");
-
-  Timestamp start_time = time_now();
-
-  Rendering_Context rendering_context = {
-    .bvh    = &bvh,
-    .camera = camera,
-    .image  = image,
-  };
-
-  #if USE_THREADS
-    for_range(i, 0, N_THREADS) {
-      thread_create(render_thread_proc, &rendering_context, THREAD_STACK_DEFAULT, THREAD_TLS_DEFAULT);
-    }
-
-    while (rendering_context.threads_done < N_THREADS) {
-      isize  c   = rendering_context.current_chunk;
-      String bar = LIT("====================");
-      f32    p   = c / (f32)((i32)N_CHUNKS);
-      if (p > 1.0f) {
-        p = 1.0f;
+          Ray r = {
+            .position = vec3_add(position, vec3_scale(normal, EPSILON)),
+          };
+          for_range(sample, 0, samples) {
+            f32 cos;
+            loop {
+              Vec3 d = rand_vec3();
+              cos = vec3_dot(d, normal);
+              if (cos > 0) {
+                r.direction = d;
+                break;
+              }
+            }
+            accumulated = vec3_add(accumulated, vec3_scale(cast_ray(scene, r, 8), cos));
+          }
+          
+          IDX(lightmap->pixels, (x + y * lightmap->stride) * lightmap->components + 0) = accumulated.x / samples;
+          IDX(lightmap->pixels, (x + y * lightmap->stride) * lightmap->components + 1) = accumulated.y / samples;
+          IDX(lightmap->pixels, (x + y * lightmap->stride) * lightmap->components + 2) = accumulated.z / samples;
+        }
       }
-      fmt_printfc("\r[%-20S] %d%%", slice_end(bar, p * 20), (i32)(100 * p));
-      time_sleep(Millisecond * 500);
     }
+  }
+}
 
-    fmt_printlnc("\r[====================] 100%");
-  #else 
-    render_thread_proc(nil);
-  #endif
+extern b8 rendering_context_is_finished(Rendering_Context *context) {
+  return context->n_threads == 0;
+}
 
-  Duration time = time_since(start_time);
-  fmt_printflnc("%dms", (isize)(time / Millisecond));
-  fmt_printflnc("%d samples/second", (isize)((u64)WIDTH * HEIGHT * SAMPLES / (f64)((f64)time / Second)));
-
-  Fd     output_file   = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));
-  Writer output_writer = writer_from_handle(output_file);
-  assert(png_save_writer(&output_writer, &image));
-  file_close(output_file);
+extern void rendering_context_finish(Rendering_Context *context) {
+  while (context->n_threads > 0) {
+    processor_yield();
+  }
 }

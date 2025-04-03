@@ -1,124 +1,18 @@
 #pragma once
 
 #include "codin/codin.h"
-
-#include "codin/allocators.h"
-#include "codin/image.h"
 #include "codin/linalg.h"
-#include "codin/os.h"
-#include "codin/fmt.h"
-#include "codin/time.h"
-#include "codin/thread.h"
-#include "codin/sort.h"
-#include "codin/math.h"
 
-#include "codin/obj.h"
-
-#include "stdatomic.h"
-#include "immintrin.h"
+#include "scene.h"
+#include "common.h"
 
 #undef  IDX
 #define IDX(arr, i) (arr).data[(i)]
-
-typedef __m256 f32x8;
-
-typedef struct {
-  f32x8 x, y;
-} Vec2x8;
-
-typedef struct {
-  f32x8 x, y, z;
-} Vec3x8;
-
-typedef union {
-  struct {
-    f32 rows[3][3];
-  };
-  f32 data[3 * 3];
-} Matrix_3x3;
-
-#define MATRIX_3X3_IDENTITY (Matrix_3x3) { \
-  .rows = {                                \
-    {1, 0, 0},                             \
-    {0, 1, 0},                             \
-    {0, 0, 1},                             \
-  },                                       \
-}
-
-internal inline Matrix_3x3 matrix_3x3_from_basis(Vec3 a, Vec3 b, Vec3 c) {
-  return (Matrix_3x3) {
-    .rows = {
-      { a.x, b.x, c.x, },
-      { a.y, b.y, c.y, },
-      { a.z, b.z, c.z, },
-    },
-  };
-}
-
-internal inline Matrix_3x3 matrix_3x3_transpose(Matrix_3x3 m) {
-  return (Matrix_3x3) {
-    .rows = {
-      { m.rows[0][0], m.rows[1][0], m.rows[2][0], },
-      { m.rows[0][1], m.rows[1][1], m.rows[2][1], },
-      { m.rows[0][2], m.rows[1][2], m.rows[2][2], },
-    },
-  };
-}
-
-internal inline Vec3 matrix_3x3_mul_vec3(Matrix_3x3 m, Vec3 v) {
-  return vec3(
-    v.x * m.rows[0][0] + v.y * m.rows[0][1] + v.z * m.rows[0][2],
-    v.x * m.rows[1][0] + v.y * m.rows[1][1] + v.z * m.rows[1][2],
-    v.x * m.rows[2][0] + v.y * m.rows[2][1] + v.z * m.rows[2][2],
-  );
-}
-
-internal inline Matrix_3x3 matrix_3x3_rotate(Vec3 v, f32 radians) {
-  f32 c = cos_f32(radians);
-  f32 s = sin_f32(radians);
-
-  Vec3 a = vec3_normalize(v);
-  Vec3 t = vec3_scale(a, 1 - c);
-
-  Matrix_3x3 rot = MATRIX_3X3_IDENTITY;
-
-  rot.rows[0][0] = c + t.data[0] * a.data[0];
-  rot.rows[1][0] = 0 + t.data[0] * a.data[1] + s * a.data[2];
-  rot.rows[2][0] = 0 + t.data[0] * a.data[2] - s * a.data[1];
-
-  rot.rows[0][1] = 0 + t.data[1] * a.data[0] - s * a.data[2];
-  rot.rows[1][1] = c + t.data[1] * a.data[1];
-  rot.rows[2][1] = 0 + t.data[1] * a.data[2] + s * a.data[0];
-
-  rot.rows[0][2] = 0 + t.data[2] * a.data[0] + s * a.data[1];
-  rot.rows[1][2] = 0 + t.data[2] * a.data[1] - s * a.data[0];
-  rot.rows[2][2] = c + t.data[2] * a.data[2];
-
-  return rot;
-}
 
 typedef struct {
   Vec3 position;
   Vec3 direction;
 } Ray;
-
-typedef struct {
-  Vec3 direction, normal, normal_geo, tangent, bitangent, position;
-  Vec2 tex_coords;
-} Shader_Input;
-
-typedef struct {
-  Vec3   direction;
-  Color3 tint, emission;
-  b8     terminate;
-} Shader_Output;
-
-typedef void (*Shader_Proc)(rawptr, Shader_Input const *, Shader_Output *);
-
-typedef struct {
-  rawptr      data;
-  Shader_Proc proc;
-} Shader;
 
 typedef struct {
   f32         distance;
@@ -137,35 +31,6 @@ typedef struct {
 } Spheres;
 
 typedef struct {
-  Vec3   a, b, c;
-  Vec3   normal_a, normal_b, normal_c;
-  Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
-  Shader shader;
-} Triangle;
-
-typedef Slice(Triangle) Triangle_Slice;
-
-typedef struct {
-  Vec3   normal, normal_a, normal_b, normal_c;
-  Vec3   tangent, bitangent;
-  Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
-  Shader shader;
-} Triangle_AOS;
-
-// SOA Vector, allocation starts at `a_x` and has a size of TRIANGLE_ALLOCATION_SIZE(N)
-typedef struct {
-  f32          *a_x, *a_y, *a_z;
-  f32          *b_x, *b_y, *b_z;
-  f32          *c_x, *c_y, *c_z;
-  Triangle_AOS *aos;
-  i32           len, cap;
-  Allocator     allocator;
-} Triangles;
-
-#define TRIANGLES_ALLOCATION_SIZE(N) \
-  ((N) * (size_of(f32) * 9 + size_of(Triangle_AOS)))
-
-typedef struct {
   f32  *min_x;
   f32  *min_y;
   f32  *min_z;
@@ -176,5 +41,15 @@ typedef struct {
 } AABBs;
 
 typedef struct {
-  Vec3 min, max;
-} AABB;
+  Image       image;
+  Scene      *scene;
+  isize       samples, max_bounces;
+  _Atomic i32 n_threads, _current_chunk;
+} Rendering_Context;
+
+extern void rendering_context_finish(Rendering_Context *context);
+extern b8   rendering_context_is_finished(Rendering_Context *context);
+
+extern void render_thread_proc(Rendering_Context *context);
+
+extern void lightmap_bake(Image const *lightmap, Scene const *scene, isize samples);
