@@ -86,7 +86,7 @@ internal void triangles_init(Triangles *triangles, isize len, isize cap, Allocat
   triangles->cap       = cap;
   triangles->allocator = allocator;
 
-  f32 *data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(cap), 32, allocator));
+  f32 *data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(cap), SIMD_ALIGN, allocator));
 
   triangles->a_x = data + cap * 0;
   triangles->a_y = data + cap * 1;
@@ -114,7 +114,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
       new_cap  = triangles->cap * 2 + ((v.len + SIMD_WIDTH + 1) / SIMD_WIDTH) * SIMD_WIDTH;
     }
     assert(new_cap % 8 == 0);
-    f32 *new_data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(new_cap), 32, triangles->allocator));
+    f32 *new_data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(new_cap), SIMD_ALIGN, triangles->allocator));
 
     mem_tcopy(new_data + new_cap * 0, triangles->a_x, triangles->len);
     mem_tcopy(new_data + new_cap * 1, triangles->a_y, triangles->len);

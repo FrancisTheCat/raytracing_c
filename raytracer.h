@@ -6,10 +6,12 @@
 #define SIMD_WIDTH 8
 
 #if SIMD_WIDTH == 8
+  #define SIMD_ALIGN 32
   #define ray_aabbs_hit_SIMD ray_aabbs_hit_8
   #define ray_spheres_hit_SIMD ray_spheres_hit_8
   #define ray_triangles_hit_SIMD ray_triangles_hit_8
 #elif SIMD_WIDTH == 16
+  #define SIMD_ALIGN 64
   #define ray_aabbs_hit_SIMD ray_aabbs_hit_16
   #define ray_spheres_hit_SIMD ray_spheres_hit_16
   #define ray_triangles_hit_SIMD ray_triangles_hit_16
