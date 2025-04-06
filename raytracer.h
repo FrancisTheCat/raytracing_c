@@ -3,6 +3,18 @@
 #include "codin/codin.h"
 #include "codin/linalg.h"
 
+#define SIMD_WIDTH 8
+
+#if SIMD_WIDTH == 8
+  #define ray_aabbs_hit_SIMD ray_aabbs_hit_8
+  #define ray_spheres_hit_SIMD ray_spheres_hit_8
+  #define ray_triangles_hit_SIMD ray_triangles_hit_8
+#elif SIMD_WIDTH == 16
+  #define ray_aabbs_hit_SIMD ray_aabbs_hit_16
+  #define ray_spheres_hit_SIMD ray_spheres_hit_16
+  #define ray_triangles_hit_SIMD ray_triangles_hit_16
+#endif
+
 #include "scene.h"
 #include "common.h"
 

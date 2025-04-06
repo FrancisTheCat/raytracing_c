@@ -77,11 +77,19 @@ typedef struct {
 
 STATIC_ASSERT(size_of(BVH_Index) == size_of(i32));
 
-typedef struct {
-  Vec3x8    mins;
-  Vec3x8    maxs;
-  BVH_Index children[8];
-} BVH_Node;
+#if SIMD_WIDTH == 8
+  typedef struct {
+    Vec3x8    mins;
+    Vec3x8    maxs;
+    BVH_Index children[8];
+  } BVH_Node;
+#elif SIMD_WIDTH == 16
+  typedef struct {
+    Vec3x16    mins;
+    Vec3x16    maxs;
+    BVH_Index children[16];
+  } BVH_Node;
+#endif
 
 typedef struct {
   Vector(BVH_Node) nodes;

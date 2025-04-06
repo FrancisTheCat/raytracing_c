@@ -12,25 +12,27 @@
 #define CHUNK_SIZE 32
 
 internal Vec3 sample_texture_nearest(Image const *texture, Vec2 tex_coords) {
+  tex_coords = vec2(
+    .x = fract_f32(tex_coords.x),
+    .y = fract_f32(1.0f - tex_coords.y),
+  );
   isize u = tex_coords.x * texture->width;
-  if (u >= texture->width) {
-    u = texture->width - 1;
-  }
-  isize v = (1 - tex_coords.y) * texture->height;
-  if (v >= texture->height) {
-    v = texture->height - 1;
-  }
+  isize v = tex_coords.y * texture->height;
 
   return vec3(
-    IDX(texture->pixels, texture->components * (u + texture->stride * v) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u + texture->stride * v) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u + texture->stride * v) + 2) / 255.0f,
+    IDX(texture->pixels, texture->components * (u + texture->stride * v) + 0) / 255.999f,
+    IDX(texture->pixels, texture->components * (u + texture->stride * v) + 1) / 255.999f,
+    IDX(texture->pixels, texture->components * (u + texture->stride * v) + 2) / 255.999f,
   );
 }
 
 internal Vec3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
-  f32 px = tex_coords.x * (texture->width - 1);
-  f32 py = (1.0f - tex_coords.y) * (texture->height - 1);
+  tex_coords = vec2(
+    .x = fract_f32(tex_coords.x),
+    .y = fract_f32(1.0f - tex_coords.y),
+  );
+  f32 px = tex_coords.x * texture->width;
+  f32 py = tex_coords.y * texture->height;
 
   isize u = (isize)px;
   isize v = (isize)py;
@@ -42,24 +44,24 @@ internal Vec3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
   isize v2 = (v + 1 < texture->height) ? v + 1 : v;
 
   Vec3 c00 = vec3(
-    IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 2) / 255.0f,
+    IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 0) / 255.999f,
+    IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 1) / 255.999f,
+    IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 2) / 255.999f,
   );
   Vec3 c10 = vec3(
-    IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 2) / 255.0f,
+    IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 0) / 255.999f,
+    IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 1) / 255.999f,
+    IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 2) / 255.999f,
   );
   Vec3 c01 = vec3(
-    IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 2) / 255.0f,
+    IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 0) / 255.999f,
+    IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 1) / 255.999f,
+    IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 2) / 255.999f,
   );
   Vec3 c11 = vec3(
-    IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 0) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 1) / 255.0f,
-    IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 2) / 255.0f,
+    IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 0) / 255.999f,
+    IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 1) / 255.999f,
+    IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 2) / 255.999f,
   );
 
   Vec3 c0 = vec3_lerp(c00, c10, a);
@@ -68,11 +70,11 @@ internal Vec3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
 }
 
 internal Color3 sample_background(Image const *image, Vec3 dir) {
-  f32 invPi    = 1.0f / PI;
-  f32 invTwoPi = 1.0f / (2.0f * PI);
+  f32 inv_pi     = 1.0f / PI;
+  f32 inv_two_pi = 1.0f / (2.0f * PI);
 
-  f32 u = 0.5f + atan2_f32(dir.z, dir.x) * invTwoPi;
-  f32 v = 0.5f - asin_f32(-dir.y) * invPi;
+  f32 u = 0.5f + atan2_f32(dir.z, dir.x) * inv_two_pi;
+  f32 v = 0.5f - asin_f32(-dir.y) * inv_pi;
 
   Vec3 color = sample_texture(image, vec2(u, v));
   return srgb_to_linear(color);
@@ -408,8 +410,8 @@ i32 main() {
         return 1;
       }
 
-      String arg2 = IDX(os_args, i + 1);
-      isize number = parse_int(&arg2);
+      String arg2   = IDX(os_args, i + 1);
+      isize  number = parse_int(&arg2);
       switch (IDX(arg, 1)) {
       CASE 'W':
         width = number;
@@ -483,7 +485,7 @@ i32 main() {
 
   Byte_Slice data = unwrap_err(read_entire_file_path(model, context.allocator));
   Obj_File   obj  = {0};
-  obj_load(bytes_to_string(data), &obj, context.allocator);
+  obj_load(bytes_to_string(data), &obj, false, context.allocator);
 
   Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
 

@@ -14,6 +14,8 @@
 
 #include "stdatomic.h"
 
+#if SIMD_WIDTH == 8
+
 internal inline f32 min_f32x8(f32x8 vec, f32 epsilon, i32 *index) {
   // Set elements less than epsilon to +∞
   f32x8 inf = _mm256_set1_ps(F32_INFINITY);
@@ -33,7 +35,7 @@ internal inline f32 min_f32x8(f32x8 vec, f32 epsilon, i32 *index) {
   return min_value;
 }
 
-internal inline f32x8 ray_spheres_hit_8(
+internal inline void ray_spheres_hit_8(
   Ray     const *ray,
   Spheres const *spheres,
   isize          offset,
@@ -228,15 +230,223 @@ internal inline u8 ray_aabbs_hit_8(
   return _mm256_movemask_ps(_mm256_cmp_ps(t_minv, t_maxv, _CMP_LT_OQ));
 }
 
-internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit *hit, i32 depth) {
-  u8 aabb_hits = ray_aabbs_hit_8(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
-  u8 mask      = 1;
+#endif
 
-  for_range(offset, 0, 8) {
+#if SIMD_WIDTH == 16
+
+internal inline f32 min_f32x16(f32x16 vec, f32 epsilon, i32 *index) {
+  __mmask16 epsilon_mask = _mm512_cmp_ps_mask(vec, _mm512_set1_ps(epsilon), _CMP_GT_OQ);
+            vec          = _mm512_mask_blend_ps(epsilon_mask, vec, _mm512_set1_ps(F32_INFINITY));
+  f32       min_value    = _mm512_reduce_min_ps(vec);
+  i32       mask         = _mm512_cmp_ps_mask(vec, _mm512_set1_ps(min_value), _CMP_EQ_OQ);
+           *index        = __builtin_ctz(mask);
+
+  return min_value;
+}
+
+internal inline b8 ray_triangles_hit_16(
+  Ray       const *ray,
+  Triangles const *triangles,
+  isize            offset,
+  Hit             *hit
+) {
+  const f32x16 epsilon  = _mm512_set1_ps( EPSILON);
+  const f32x16 nepsilon = _mm512_set1_ps(-EPSILON);
+
+  Vec3x16 ray_dir, ray_origin;
+  ray_dir.x = _mm512_set1_ps(ray->direction.x);
+  ray_dir.y = _mm512_set1_ps(ray->direction.y);
+  ray_dir.z = _mm512_set1_ps(ray->direction.z);
+
+  ray_origin.x = _mm512_set1_ps(ray->position.x);
+  ray_origin.y = _mm512_set1_ps(ray->position.y);
+  ray_origin.z = _mm512_set1_ps(ray->position.z);
+
+  Vec3x16 a, b, c;
+  a.x = _mm512_load_ps(triangles->a_x + offset);
+  a.y = _mm512_load_ps(triangles->a_y + offset);
+  a.z = _mm512_load_ps(triangles->a_z + offset);
+  
+  b.x = _mm512_load_ps(triangles->b_x + offset);
+  b.y = _mm512_load_ps(triangles->b_y + offset);
+  b.z = _mm512_load_ps(triangles->b_z + offset);
+  
+  c.x = _mm512_load_ps(triangles->c_x + offset);
+  c.y = _mm512_load_ps(triangles->c_y + offset);
+  c.z = _mm512_load_ps(triangles->c_z + offset);
+
+  Vec3x16 edge1, edge2;
+  edge1.x = b.x - a.x;
+  edge1.y = b.y - a.y;
+  edge1.z = b.z - a.z;
+
+  edge2.x = c.x - a.x;
+  edge2.y = c.y - a.y;
+  edge2.z = c.z - a.z;
+
+  Vec3x16 ray_cross_e2 = vec3x16_cross(ray_dir, edge2);
+
+  f32x16     det = vec3x16_dot(edge1, ray_cross_e2);
+  f32x16 inv_det = 1.0f / det;
+
+  Vec3x16 s = vec3x16_sub(ray_origin, a);
+  
+  Vec3x16 s_cross_e1 = vec3x16_cross(s, edge1);
+
+  f32x16 u = inv_det * vec3x16_dot(s, ray_cross_e2);
+  f32x16 v = inv_det * vec3x16_dot(ray_dir, s_cross_e1);
+  f32x16 t = inv_det * vec3x16_dot(edge2,   s_cross_e1);
+
+  // (u < -epsilon || u > 1 + epsilon)
+  __mmask16 miss_mask_1 = 
+    _mm512_cmp_ps_mask(u, nepsilon, _CMP_LT_OQ) |
+    _mm512_cmp_ps_mask(u, _mm512_set1_ps(1 + EPSILON), _CMP_GT_OQ);
+
+  // (v < -epsilon || u + v > 1 + epsilon)
+  __mmask16 miss_mask_2 = 
+    _mm512_cmp_ps_mask(v, nepsilon, _CMP_LT_OQ) |
+    _mm512_cmp_ps_mask(u + v, _mm512_set1_ps(1 + EPSILON), _CMP_GT_OQ);
+
+  __mmask16 miss_mask_3 = _mm512_cmp_ps_mask(t, epsilon, _CMP_LT_OQ);
+
+  __mmask16 miss_mask = miss_mask_1 | miss_mask_2 | miss_mask_3;
+
+  f32x16 distances = _mm512_mask_blend_ps(miss_mask, t, _mm512_set1_ps(F32_INFINITY));
+
+  i32 triangle_index;
+  f32 min = min_f32x16(distances, 0, &triangle_index);
+
+  if (min < hit->distance) {
+    hit->distance = min;
+
+    i32 t = triangle_index + offset;
+
+    f32 t1 = u[triangle_index];
+    f32 t2 = v[triangle_index];
+    f32 t0 = 1 - t1 - t2;
+
+    hit->point      = vec3_add(ray->position, vec3_scale(ray->direction, min));
+    hit->normal     = vec3(
+      .x = triangles->aos[t].normal_a.x * t0 + triangles->aos[t].normal_b.x * t1 + triangles->aos[t].normal_c.x * t2,
+      .y = triangles->aos[t].normal_a.y * t0 + triangles->aos[t].normal_b.y * t1 + triangles->aos[t].normal_c.y * t2,
+      .z = triangles->aos[t].normal_a.z * t0 + triangles->aos[t].normal_b.z * t1 + triangles->aos[t].normal_c.z * t2,
+    );
+    hit->tex_coords = vec2(
+      .x = triangles->aos[t].tex_coords_a.x * t0 + triangles->aos[t].tex_coords_b.x * t1 + triangles->aos[t].tex_coords_c.x * t2,
+      .y = triangles->aos[t].tex_coords_a.y * t0 + triangles->aos[t].tex_coords_b.y * t1 + triangles->aos[t].tex_coords_c.y * t2,
+    );
+    hit->shader     = triangles->aos[t].shader;
+
+    hit->normal_geo = triangles->aos[t].normal;
+    hit->tangent    = triangles->aos[t].tangent;
+    hit->bitangent  = triangles->aos[t].bitangent;
+
+    return true;
+  }
+
+  return false;
+}
+
+internal inline u16 ray_aabbs_hit_16(
+  Ray   *ray,
+  f32    t_min,
+  f32    t_max,
+  Vec3x16 mins,
+  Vec3x16 maxs
+) {
+  Vec3x16 inv_dir = {
+    .x = _mm512_set1_ps(1.0f / ray->direction.x),
+    .y = _mm512_set1_ps(1.0f / ray->direction.y),
+    .z = _mm512_set1_ps(1.0f / ray->direction.z),
+  };
+  Vec3x16 origin = {
+    .x = _mm512_set1_ps(ray->position.x),
+    .y = _mm512_set1_ps(ray->position.y),
+    .z = _mm512_set1_ps(ray->position.z),
+  };
+
+  Vec3x16 t0s = vec3x16_mul(vec3x16_sub(mins, origin), inv_dir);
+  Vec3x16 t1s = vec3x16_mul(vec3x16_sub(maxs, origin), inv_dir);
+
+  Vec3x16 t_small = {
+    .x = _mm512_min_ps(t0s.x, t1s.x),
+    .y = _mm512_min_ps(t0s.y, t1s.y),
+    .z = _mm512_min_ps(t0s.z, t1s.z),
+  };
+
+  Vec3x16 t_big = {
+    .x = _mm512_max_ps(t0s.x, t1s.x),
+    .y = _mm512_max_ps(t0s.y, t1s.y),
+    .z = _mm512_max_ps(t0s.z, t1s.z),
+  };
+
+  f32x16 t_minv = _mm512_max_ps(_mm512_set1_ps(t_min), _mm512_max_ps(t_small.x, _mm512_max_ps(t_small.y, t_small.z)));
+  f32x16 t_maxv = _mm512_min_ps(_mm512_set1_ps(t_max), _mm512_min_ps(t_big.x,   _mm512_min_ps(t_big.y,   t_big.z)));
+
+  return _mm512_cmp_ps_mask(t_minv, t_maxv, _CMP_LT_OQ);
+}
+
+internal inline void ray_spheres_hit_16(
+  Ray     const *ray,
+  Spheres const *spheres,
+  isize          offset,
+  Hit           *hit
+) {
+  f32x16 x = _mm512_load_ps(spheres->position_x + offset * 8);
+  f32x16 y = _mm512_load_ps(spheres->position_y + offset * 8);
+  f32x16 z = _mm512_load_ps(spheres->position_z + offset * 8);
+  f32x16 r = _mm512_load_ps(spheres->radius     + offset * 8);
+
+  f32x16 rox = _mm512_set1_ps(ray->position.x);
+  f32x16 roy = _mm512_set1_ps(ray->position.y);
+  f32x16 roz = _mm512_set1_ps(ray->position.z);
+
+  f32x16 rdx = _mm512_set1_ps(ray->direction.x);
+  f32x16 rdy = _mm512_set1_ps(ray->direction.y);
+  f32x16 rdz = _mm512_set1_ps(ray->direction.z);
+
+  f32x16 ox = rox - x;
+  f32x16 oy = roy - y;
+  f32x16 oz = roz - z;
+
+  f32x16 a = _mm512_set1_ps(vec3_dot(ray->direction, ray->direction));
+  f32x16 b = (ox * rdx + oy * rdy + oz * rdz) * 2.0f;
+  f32x16 c = (ox * ox  + oy * oy  + oz * oz) - r * r;
+
+  f32x16 d = b * b - 4.0f * a * c;
+  f32x16 d_sqrt = _mm512_sqrt_ps(d);
+
+  __mmask16 hit_mask = _mm512_cmp_ps_mask(d, _mm512_setzero_ps(), _CMP_LE_OQ);
+
+  f32x16 distances = (-b - d_sqrt) / (2.0f * a);
+
+  distances = _mm512_mask_blend_ps(hit_mask, distances, _mm512_set1_ps(F32_INFINITY));
+  
+  i32 idx;
+  f32 new_min = min_f32x16(distances, EPSILON, &idx);
+  if (new_min < hit->distance) {
+    hit->distance = new_min;
+
+    i32 s = idx + offset * 8;
+
+    hit->point  = vec3_add(ray->position, vec3_scale(ray->direction, hit->distance));
+    hit->normal = vec3_sub(hit->point, vec3(spheres->position_x[s], spheres->position_y[s], spheres->position_z[s]));
+    hit->normal = vec3_scale(hit->normal, 1.0f / spheres->radius[s]);
+    hit->shader = spheres->shader[s];
+  }
+}
+
+#endif
+
+internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit *hit, i32 depth) {
+  u16 aabb_hits = ray_aabbs_hit_SIMD(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
+  u16 mask      = 1;
+
+  for_range(offset, 0, SIMD_WIDTH) {
     if (aabb_hits & mask) {
       BVH_Index idx = node->children[offset];
       if (idx.leaf) {
-        ray_triangles_hit_8(ray, &scene->triangles, idx.index, hit);
+        ray_triangles_hit_SIMD(ray, &scene->triangles, idx.index, hit);
       } else {
         ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, idx.index), hit, depth + 1);
       }
@@ -246,14 +456,14 @@ internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit
 }
 
 internal inline void ray_spheres_hit(Ray *ray, Spheres *spheres, Hit *hit) {
-  for_range(offset, 0, (spheres->len + 7) / 8) {
-    ray_spheres_hit_8(ray, spheres, offset * 8, hit);
+  for_range(offset, 0, (spheres->len + SIMD_WIDTH - 1) / SIMD_WIDTH) {
+    ray_spheres_hit_SIMD(ray, spheres, offset * SIMD_WIDTH, hit);
   }
 }
 
 internal inline void ray_triangles_hit(Ray const *ray, Triangles const *triangles, Hit *hit) {
-  for_range(offset, 0, (triangles->len + 7) / 8) {
-    ray_triangles_hit_8(ray, triangles, offset * 8, hit);
+  for_range(offset, 0, (triangles->len + SIMD_WIDTH - 1) / SIMD_WIDTH) {
+    ray_triangles_hit_SIMD(ray, triangles, offset * SIMD_WIDTH, hit);
   }
 }
 
@@ -262,7 +472,7 @@ internal void ray_scene_hit(Ray *ray, Scene const *scene, Hit *hit) {
   ray_triangles_hit(ray, &scene->triangles, hit);
 #else
   if (scene->bvh.root.leaf) {
-    ray_triangles_hit_8(ray, &scene->triangles, scene->bvh.root.index, hit);
+    ray_triangles_hit_SIMD(ray, &scene->triangles, scene->bvh.root.index, hit);
   } else {
     ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, scene->bvh.root.index), hit, 1);
   }

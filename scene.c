@@ -111,7 +111,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
   if (triangles->len + v.len >= triangles->cap) {
     isize new_cap = max(triangles->cap * 2, 8);
     if (triangles->cap + v.len > new_cap) {
-      new_cap  = triangles->cap * 2 + ((v.len + 7) / 8) * 8;
+      new_cap  = triangles->cap * 2 + ((v.len + SIMD_WIDTH + 1) / SIMD_WIDTH) * SIMD_WIDTH;
     }
     assert(new_cap % 8 == 0);
     f32 *new_data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(new_cap), 32, triangles->allocator));
@@ -256,29 +256,29 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
 }
 
 internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
-  if (triangles.len <= 8) {
+  if (triangles.len <= SIMD_WIDTH) {
     BVH_Index idx = { .index = scene->triangles.len, .leaf = true, };
     triangles_append(&scene->triangles, triangles);
-    while (scene->triangles.len % 8) {
+    while (scene->triangles.len % SIMD_WIDTH) {
       scene->triangles.len += 1;
     }
     assert(scene->triangles.len <= scene->triangles.cap);
     return idx;
   }
 
-  Triangle_Slice slices[8] = { triangles, };
+  Triangle_Slice slices[SIMD_WIDTH] = { triangles, };
   isize n_slices = 1;
 
-  while (n_slices < 8) {
+  while (n_slices < SIMD_WIDTH) {
     isize _n_slices = n_slices;
     for_range(slice_i, 0, _n_slices) {
       Triangle_Slice slice = slices[slice_i];
-      if (slice.len <= 8) {
+      if (slice.len <= SIMD_WIDTH) {
         n_slices += 1;
         continue;
       }
       f32 min_surface_area = F32_INFINITY;
-      i32 best_axis;
+      i32 best_axis = 0;
       for_range(axis, 0, 3) {
         sort_triangle_slice(slice, axis);
         AABB a, b;
@@ -326,6 +326,6 @@ internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
 
 extern void scene_init(Scene *scene, Triangle_Slice src_triangles, Allocator allocator) {
   vector_init(&scene->bvh.nodes, 0, 8, allocator);
-  triangles_init(&scene->triangles, 0, src_triangles.len * 8, allocator);
+  triangles_init(&scene->triangles, 0, src_triangles.len, allocator);
   scene->bvh.root = bvh_build(scene, src_triangles);
 }

@@ -154,3 +154,39 @@ internal inline Color3 srgb_to_linear(Color3 x) {
 internal inline f32 linear_to_srgb(f32 c) {
   return (c <= 0.0031308f) ? (12.92f * c) : (1.055f * pow_f32(c, 1.0f / 2.4f) - 0.055f);
 }
+
+#if SIMD_WIDTH == 16
+typedef __m512 f32x16;
+
+typedef struct {
+  f32x16 x, y, z;
+} Vec3x16;
+
+internal inline Vec3x16 vec3x16_cross(Vec3x16 a, Vec3x16 b) {
+  return (Vec3x16) {
+    .x = a.y * b.z - a.z * b.y,
+    .y = a.z * b.x - a.x * b.z,
+    .z = a.x * b.y - a.y * b.x,
+  };
+}
+
+internal inline Vec3x16 vec3x16_sub(Vec3x16 a, Vec3x16 b) {
+  return (Vec3x16) {
+    .x = a.x - b.x,
+    .y = a.y - b.y,
+    .z = a.z - b.z,
+  };
+}
+
+internal inline Vec3x16 vec3x16_mul(Vec3x16 a, Vec3x16 b) {
+  return (Vec3x16) {
+    .x = a.x * b.x,
+    .y = a.y * b.y,
+    .z = a.z * b.z,
+  };
+}
+
+internal inline f32x16 vec3x16_dot(Vec3x16 a, Vec3x16 b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+#endif
