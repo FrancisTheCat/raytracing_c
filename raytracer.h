@@ -45,16 +45,6 @@ typedef struct {
 } Spheres;
 
 typedef struct {
-  f32  *min_x;
-  f32  *min_y;
-  f32  *min_z;
-  f32  *max_x;
-  f32  *max_y;
-  f32  *max_z;
-  isize len;
-} AABBs;
-
-typedef struct {
   Image       image;
   Scene      *scene;
   isize       samples, max_bounces;

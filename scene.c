@@ -4,6 +4,7 @@
 #include "codin/io.h"
 #include "codin/sort.h"
 
+#include "raytracer.h"
 #include "scene.h"
 
 typedef struct __attribute__((aligned(32))) {

@@ -8,6 +8,7 @@
 #include "codin/sort.h"
 #include "codin/strconv.h"
 #include "codin/thread.h"
+#include "codin/time.h"
 
 #include "scene.h"
 #include "scene.c"
@@ -191,12 +192,13 @@ internal inline b8 ray_triangles_hit_8(
   return false;
 }
 
-internal inline u8 ray_aabbs_hit_8(
+internal inline void ray_aabbs_hit_8(
   Ray   *ray,
   f32    t_min,
   f32    t_max,
   Vec3x8 mins,
-  Vec3x8 maxs
+  Vec3x8 maxs,
+  f32   *distances
 ) {
   Vec3x8 inv_dir = {
     .x = _mm256_set1_ps(1.0f / ray->direction.x),
@@ -227,7 +229,9 @@ internal inline u8 ray_aabbs_hit_8(
   f32x8 t_minv = _mm256_max_ps(_mm256_set1_ps(t_min), _mm256_max_ps(t_small.x, _mm256_max_ps(t_small.y, t_small.z)));
   f32x8 t_maxv = _mm256_min_ps(_mm256_set1_ps(t_max), _mm256_min_ps(t_big.x,   _mm256_min_ps(t_big.y,   t_big.z)));
 
-  return _mm256_movemask_ps(_mm256_cmp_ps(t_minv, t_maxv, _CMP_LT_OQ));
+  f32x8 miss_mask = _mm256_cmp_ps(t_minv, t_maxv, _CMP_GE_OQ);
+  f32x8 distances_v = _mm256_blendv_ps(t_minv, _mm256_set1_ps(F32_INFINITY), miss_mask);
+  _mm256_store_ps(distances, distances_v);
 }
 
 #endif
@@ -347,7 +351,7 @@ internal inline b8 ray_triangles_hit_16(
   return false;
 }
 
-internal inline u16 ray_aabbs_hit_16(
+internal inline void ray_aabbs_hit_16(
   Ray   *ray,
   f32    t_min,
   f32    t_max,
@@ -383,7 +387,9 @@ internal inline u16 ray_aabbs_hit_16(
   f32x16 t_minv = _mm512_max_ps(_mm512_set1_ps(t_min), _mm512_max_ps(t_small.x, _mm512_max_ps(t_small.y, t_small.z)));
   f32x16 t_maxv = _mm512_min_ps(_mm512_set1_ps(t_max), _mm512_min_ps(t_big.x,   _mm512_min_ps(t_big.y,   t_big.z)));
 
-  return _mm512_cmp_ps_mask(t_minv, t_maxv, _CMP_LT_OQ);
+  __mmask16 miss_mask   = _mm512_cmp_ps_mask(t_minv, t_maxv, _CMP_GE_OQ);
+  f32x16    distances_v = _mm512_mask_blend_ps(miss_mask, t_minv, _mm512_set1_ps(F32_INFINITY));
+  _mm512_store_ps(distances, distances_v);
 }
 
 internal inline void ray_spheres_hit_16(
@@ -438,20 +444,36 @@ internal inline void ray_spheres_hit_16(
 
 #endif
 
-internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit *hit, i32 depth) {
-  u16 aabb_hits = ray_aabbs_hit_SIMD(ray, EPSILON, F32_INFINITY, node->mins, node->maxs);
-  u16 mask      = 1;
+internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit *hit) {
+  f32 distances[SIMD_WIDTH] __attribute__((aligned(SIMD_ALIGN)));
+  ray_aabbs_hit_SIMD(ray, EPSILON, hit->distance, node->mins, node->maxs, &distances[0]);
 
-  for_range(offset, 0, SIMD_WIDTH) {
-    if (aabb_hits & mask) {
-      BVH_Index idx = node->children[offset];
-      if (idx.leaf) {
-        ray_triangles_hit_SIMD(ray, &scene->triangles, idx.index, hit);
-      } else {
-        ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, idx.index), hit, depth + 1);
+  // NOTE(Franz): this depth sorting is, tho substantially more complicated than the naive approach
+  // the idea is that we do the near collisions first, which we can then compare to the upper bound
+  // for the distance given by the aabb hit check.
+  for_range(i, 0, SIMD_WIDTH) {
+    f32 min_distance = F32_INFINITY;
+    i32 min_index    = -1;
+
+    for_range(j, 0, SIMD_WIDTH) {
+      if (distances[j] < min_distance) {
+        min_distance = distances[j];
+        min_index    = j;
       }
     }
-    mask <<= 1;
+
+    if (min_index == -1 || min_distance >= hit->distance) {
+      return;
+    }
+
+    BVH_Index idx = node->children[min_index];
+    if (idx.leaf) {
+      ray_triangles_hit_SIMD(ray, &scene->triangles, idx.index, hit);
+    } else {
+      ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, idx.index), hit);
+    }
+    
+    distances[min_index] = F32_INFINITY;
   }
 }
 
@@ -474,7 +496,7 @@ internal void ray_scene_hit(Ray *ray, Scene const *scene, Hit *hit) {
   if (scene->bvh.root.leaf) {
     ray_triangles_hit_SIMD(ray, &scene->triangles, scene->bvh.root.index, hit);
   } else {
-    ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, scene->bvh.root.index), hit, 1);
+    ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, scene->bvh.root.index), hit);
   }
 #endif
 }
@@ -571,6 +593,8 @@ internal inline f32x8 hash12x8(Vec2x8 p) {
 }
 
 extern void render_thread_proc(Rendering_Context *ctx) {
+  random_state = time_now();
+
   Camera camera = ctx->scene->camera;
 
   #define CHUNK_SIZE 32
