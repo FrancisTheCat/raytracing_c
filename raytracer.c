@@ -239,7 +239,7 @@ internal inline void ray_aabbs_hit_8(
 #if SIMD_WIDTH == 16
 
 internal inline f32 min_f32x16(f32x16 vec, f32 epsilon, i32 *index) {
-  __mmask16 epsilon_mask = _mm512_cmp_ps_mask(vec, _mm512_set1_ps(epsilon), _CMP_GT_OQ);
+  __mmask16 epsilon_mask = _mm512_cmp_ps_mask(vec, _mm512_set1_ps(epsilon), _CMP_LE_OQ);
             vec          = _mm512_mask_blend_ps(epsilon_mask, vec, _mm512_set1_ps(F32_INFINITY));
   f32       min_value    = _mm512_reduce_min_ps(vec);
   i32       mask         = _mm512_cmp_ps_mask(vec, _mm512_set1_ps(min_value), _CMP_EQ_OQ);
@@ -356,7 +356,8 @@ internal inline void ray_aabbs_hit_16(
   f32    t_min,
   f32    t_max,
   Vec3x16 mins,
-  Vec3x16 maxs
+  Vec3x16 maxs,
+  f32    *distances
 ) {
   Vec3x16 inv_dir = {
     .x = _mm512_set1_ps(1.0f / ray->direction.x),
