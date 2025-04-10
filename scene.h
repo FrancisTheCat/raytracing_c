@@ -11,8 +11,7 @@ typedef struct {
 } AABB;
 
 typedef struct {
-  Matrix_3x3 matrix;
-  Vec3       position;
+  Matrix_4x4 view_matrix;
   f32        fov, focal_length;
 } Camera;
 

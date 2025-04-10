@@ -609,6 +609,8 @@ extern void render_thread_proc(Rendering_Context *ctx) {
   chunks_y    = ((height + CHUNK_SIZE - 1) / CHUNK_SIZE);
   n_chunks    = chunks_x * chunks_y;
 
+  Vec3 camera_position = matrix_4x4_mul_vec4(camera.view_matrix, vec4(0, 0, 0, 1)).xyz;
+
   f32 inv_samples = 1.0f / samples;
   f32 inv_width   = 1.0f / width;
   f32 inv_height  = 1.0f / height;
@@ -665,9 +667,9 @@ extern void render_thread_proc(Rendering_Context *ctx) {
           );
 
           directions = (Vec3x8) {
-            .x = camera.matrix.rows[0][0] * directions.x + camera.matrix.rows[0][1] * directions.y + camera.matrix.rows[0][2] * directions.z,
-            .y = camera.matrix.rows[1][0] * directions.x + camera.matrix.rows[1][1] * directions.y + camera.matrix.rows[1][2] * directions.z,
-            .z = camera.matrix.rows[2][0] * directions.x + camera.matrix.rows[2][1] * directions.y + camera.matrix.rows[2][2] * directions.z,
+            .x = camera.view_matrix.rows[0][0] * directions.x + camera.view_matrix.rows[0][1] * directions.y + camera.view_matrix.rows[0][2] * directions.z,
+            .y = camera.view_matrix.rows[1][0] * directions.x + camera.view_matrix.rows[1][1] * directions.y + camera.view_matrix.rows[1][2] * directions.z,
+            .z = camera.view_matrix.rows[2][0] * directions.x + camera.view_matrix.rows[2][1] * directions.y + camera.view_matrix.rows[2][2] * directions.z,
           };
 
           directions.x *= inv_lengths;
@@ -687,7 +689,7 @@ extern void render_thread_proc(Rendering_Context *ctx) {
               break;
             }
             Ray r = {
-              .position  = camera.position,
+              .position  = camera_position,
               .direction = vec3(directions_x[sample], directions_y[sample], directions_z[sample]),
             };
             color = vec3_add(color, cast_ray(ctx->scene, r, max_bounces));

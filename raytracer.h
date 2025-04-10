@@ -20,8 +20,8 @@
 #include "scene.h"
 #include "common.h"
 
-#undef  IDX
-#define IDX(arr, i) (arr).data[(i)]
+// #undef  IDX
+// #define IDX(arr, i) (arr).data[(i)]
 
 typedef struct {
   Vec3 position;

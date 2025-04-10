@@ -5,6 +5,8 @@
 #include "codin/thread.h"
 
 #include "raytracer.h"
+#include "gltf.h"
+#include "uri.h"
 
 // #define sample_texture sample_texture_nearest
 #define sample_texture sample_texture_bilinear
@@ -27,10 +29,13 @@ internal Vec3 sample_texture_nearest(Image const *texture, Vec2 tex_coords) {
 }
 
 internal Vec3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
-  tex_coords = vec2(
-    .x = fract_f32(tex_coords.x),
-    .y = fract_f32(1.0f - tex_coords.y),
-  );
+  tex_coords = vec2_fract(tex_coords);
+  if (tex_coords.x < 0) {
+    tex_coords.x += 1;
+  }
+  if (tex_coords.y < 0) {
+    tex_coords.y += 1;
+  }
   f32 px = tex_coords.x * texture->width;
   f32 py = tex_coords.y * texture->height;
 
@@ -74,7 +79,7 @@ internal Color3 sample_background(Image const *image, Vec3 dir) {
   f32 inv_two_pi = 1.0f / (2.0f * PI);
 
   f32 u = 0.5f + atan2_f32(dir.z, dir.x) * inv_two_pi;
-  f32 v = 0.5f - asin_f32(-dir.y) * inv_pi;
+  f32 v = 0.5f - asin_f32(dir.y) * inv_pi;
 
   Vec3 color = sample_texture(image, vec2(u, v));
   return srgb_to_linear(color);
@@ -257,6 +262,9 @@ typedef struct {
 
 Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir) {
   f32  aspect       = data->anisotropic_aspect;
+  if (aspect == 0) {
+    aspect = 1;
+  }
   f32  alpha_x      = (data->roughness * data->roughness) / aspect;
   f32  alpha_y      = (data->roughness * data->roughness) * aspect;
   Vec3 micro_normal = sample_GGX_VNDF(in_dir, alpha_x, alpha_y);
@@ -475,11 +483,12 @@ i32 main() {
   load_texture(LIT("helmet_emission.png"), &texture_emission);
   load_texture(LIT("helmet_mr.png"),       &texture_metal_roughness);
 
-  f32 angle    = PI / 6.0f;
-  f32 distance = 2;
+  // f32 angle    = PI / 6.0f;
+  // f32 distance = 2;
 
-  scene.camera.position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
-  scene.camera.matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
+  scene.camera.view_matrix = MATRIX_4X4_IDENTITY;
+  // scene.camera.position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
+  // scene.camera.matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
   scene.camera.fov          = (70.0f / 360.0f) * PI * 2.0;
   scene.camera.focal_length = 1.0f / tan_f32(scene.camera.fov * 0.5f);
 
@@ -487,7 +496,8 @@ i32 main() {
   Obj_File   obj  = {0};
   obj_load(bytes_to_string(data), &obj, false, context.allocator);
 
-  Triangle_Slice triangles = slice_make(Triangle_Slice, obj.triangles.len, context.allocator);
+  Triangle_Slice triangles;
+  slice_init(&triangles, obj.triangles.len, context.allocator);
 
   isize n_triangles = obj.triangles.len;
 
@@ -507,21 +517,109 @@ i32 main() {
     .proc = disney_shader_proc,
   };
 
-  slice_iter_v(obj.triangles, t, i, {
-    IDX(triangles, i) = (Triangle) {
-      .a            = t.a.position,
-      .b            = t.b.position,
-      .c            = t.c.position,
-      .normal_a     = t.a.normal,
-      .normal_b     = t.b.normal,
-      .normal_c     = t.c.normal,
-      .tex_coords_a = t.a.tex_coords,
-      .tex_coords_b = t.b.tex_coords,
-      .tex_coords_c = t.c.tex_coords,
-      .shader       = shader,
+  // slice_iter_v(obj.triangles, t, i, {
+  //   IDX(triangles, i) = (Triangle) {
+  //     .a            = t.a.position,
+  //     .b            = t.b.position,
+  //     .c            = t.c.position,
+  //     .normal_a     = t.a.normal,
+  //     .normal_b     = t.b.normal,
+  //     .normal_c     = t.c.normal,
+  //     .tex_coords_a = t.a.tex_coords,
+  //     .tex_coords_b = t.b.tex_coords,
+  //     .tex_coords_c = t.c.tex_coords,
+  //     .shader       = shader,
+  //   };
+  // });
+
+  Byte_Slice gltf_data = unwrap_err(read_entire_file_path(LIT("helmet.gltf"), context.allocator));
+
+  Gltf_File gltf;
+  gltf_parse_file(bytes_to_string(gltf_data), &gltf, context.allocator);
+  gltf_load_buffers(LIT(""), &gltf, context.allocator);
+  Gltf_Triangle_Vector gltf_triangles;
+  vector_init(&gltf_triangles, 0, 8, context.allocator);
+  gltf_to_triangles(&gltf, &gltf_triangles);
+
+  slice_iter_v(gltf.nodes, node, i, {
+    if (node.camera != -1) {
+      Gltf_Camera cam = IDX(gltf.cameras, node.camera);
+      if (cam.is_orthographic) {
+        continue;
+      }
+      scene.camera = (Camera) {
+        .fov          = cam.perspective.y_fov,
+        .focal_length = 1.0f / tan_f32(cam.perspective.y_fov * 0.5f),
+        .view_matrix  = node.matrix,
+      };
+      break;
+    }
+  });
+
+  slice_init(&triangles, gltf_triangles.len, context.allocator);
+  n_triangles = gltf_triangles.len;
+
+  Slice(Shader) gltf_shaders;
+  slice_init(&gltf_shaders, gltf.materials.len, context.allocator);
+
+  Slice(PBR_Shader_Data) gltf_shader_data;
+  slice_init(&gltf_shader_data, gltf.materials.len, context.allocator);
+
+  Slice(Image) gltf_images;
+  slice_init(&gltf_images, gltf.images.len, context.allocator);
+
+  slice_iter_v(gltf.images, image, i, {
+    Byte_Slice data;
+    if (image.buffer_view != -1) {
+      Gltf_Buffer_View view = IDX(gltf.buffer_views, image.buffer_view);
+      Gltf_Buffer buffer = IDX(gltf.buffers, view.buffer);
+      data = slice_range(buffer.data, view.byte_offset, view.byte_offset + view.byte_length);
+    } else {
+      data = image.data;
+    }
+    fmt_printflnc("type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, data.len);
+  });
+
+  slice_iter_v(gltf.materials, material, i, {
+    PBR_Shader_Data data = {
+      .base_color = vec3(
+        material.pbr_metallic_roughness.base_color_factor.r,
+        material.pbr_metallic_roughness.base_color_factor.g,
+        material.pbr_metallic_roughness.base_color_factor.b,
+      ),
+      .roughness          = material.pbr_metallic_roughness.roughness_factor,
+      .metalness          = material.pbr_metallic_roughness.metallic_factor,
+      // .emission           = material.emissive_factor,
+      .anisotropic_aspect = 1,
+    };
+    if (material.normal_texture.index != -1) {
+    }
+    IDX(gltf_shader_data, i) = data;
+    IDX(gltf_shaders, i) = (Shader) {
+      .data = &IDX(gltf_shader_data, i),
+      .proc = disney_shader_proc,
     };
   });
 
+  slice_iter_v(gltf_triangles, t, i, {
+    IDX(triangles, i) = (Triangle) {
+      .a            = t.vertices[0].position,
+      .b            = t.vertices[1].position,
+      .c            = t.vertices[2].position,
+      .normal_a     = t.vertices[0].normal,
+      .normal_b     = t.vertices[1].normal,
+      .normal_c     = t.vertices[2].normal,
+      .tex_coords_a = t.vertices[0].tex_coords,
+      .tex_coords_b = t.vertices[1].tex_coords,
+      .tex_coords_c = t.vertices[2].tex_coords,
+      // .shader       = (Shader) {
+      //   .data = &IDX(gltf_shader_data, t.material),
+      //   .proc = disney_shader_proc,
+      // },
+      .shader = shader,
+    };
+  });
+  
   Timestamp bvh_start_time = time_now();
   scene_init(&scene, triangles, context.allocator);
   fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
