@@ -251,7 +251,7 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
       aabb_triangle(&IDX(slice, i), &aabb_i);
       aabb_triangle(&IDX(slice, j), &aabb_j);
 
-      aabb_i.min.data[axis] < aabb_j.min.data[axis];
+      aabb_i.min.data[axis] <= aabb_j.min.data[axis];
     })
   );
 }

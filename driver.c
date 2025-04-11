@@ -1,7 +1,9 @@
 #include "codin/codin.h"
+
+#include "codin/allocators.h"
 #include "codin/fmt.h"
-#include "codin/strconv.h"
 #include "codin/obj.h"
+#include "codin/strconv.h"
 #include "codin/thread.h"
 
 #include "raytracer.h"
@@ -13,11 +15,14 @@
 
 #define CHUNK_SIZE 32
 
-internal Vec3 sample_texture_nearest(Image const *texture, Vec2 tex_coords) {
-  tex_coords = vec2(
-    .x = fract_f32(tex_coords.x),
-    .y = fract_f32(1.0f - tex_coords.y),
-  );
+internal Color3 sample_texture_nearest(Image const *texture, Vec2 tex_coords) {
+  if (tex_coords.x < 0) {
+    tex_coords.x += -(i32)tex_coords.x + 1;
+  }
+  if (tex_coords.y < 0) {
+    tex_coords.y += -(i32)tex_coords.y + 1;
+  }
+  tex_coords = vec2_fract(tex_coords);
   isize u = tex_coords.x * texture->width;
   isize v = tex_coords.y * texture->height;
 
@@ -28,14 +33,14 @@ internal Vec3 sample_texture_nearest(Image const *texture, Vec2 tex_coords) {
   );
 }
 
-internal Vec3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
-  tex_coords = vec2_fract(tex_coords);
+internal Color3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
   if (tex_coords.x < 0) {
-    tex_coords.x += 1;
+    tex_coords.x += -(i32)tex_coords.x + 1;
   }
   if (tex_coords.y < 0) {
-    tex_coords.y += 1;
+    tex_coords.y += -(i32)tex_coords.y + 1;
   }
+  tex_coords = vec2_fract(tex_coords);
   f32 px = tex_coords.x * texture->width;
   f32 py = tex_coords.y * texture->height;
 
@@ -48,29 +53,29 @@ internal Vec3 sample_texture_bilinear(Image const *texture, Vec2 tex_coords) {
   isize u2 = (u + 1 < texture->width)  ? u + 1 : u;
   isize v2 = (v + 1 < texture->height) ? v + 1 : v;
 
-  Vec3 c00 = vec3(
+  Color3 c00 = vec3(
     IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 0) / 255.999f,
     IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 1) / 255.999f,
     IDX(texture->pixels, texture->components * (u  + texture->stride * v ) + 2) / 255.999f,
   );
-  Vec3 c10 = vec3(
+  Color3 c10 = vec3(
     IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 0) / 255.999f,
     IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 1) / 255.999f,
     IDX(texture->pixels, texture->components * (u2 + texture->stride * v ) + 2) / 255.999f,
   );
-  Vec3 c01 = vec3(
+  Color3 c01 = vec3(
     IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 0) / 255.999f,
     IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 1) / 255.999f,
     IDX(texture->pixels, texture->components * (u  + texture->stride * v2) + 2) / 255.999f,
   );
-  Vec3 c11 = vec3(
+  Color3 c11 = vec3(
     IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 0) / 255.999f,
     IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 1) / 255.999f,
     IDX(texture->pixels, texture->components * (u2 + texture->stride * v2) + 2) / 255.999f,
   );
 
-  Vec3 c0 = vec3_lerp(c00, c10, a);
-  Vec3 c1 = vec3_lerp(c01, c11, a);
+  Color3 c0 = vec3_lerp(c00, c10, a);
+  Color3 c1 = vec3_lerp(c01, c11, a);
   return vec3_lerp(c0, c1, b);
 }
 
@@ -81,7 +86,7 @@ internal Color3 sample_background(Image const *image, Vec3 dir) {
   f32 u = 0.5f + atan2_f32(dir.z, dir.x) * inv_two_pi;
   f32 v = 0.5f - asin_f32(dir.y) * inv_pi;
 
-  Vec3 color = sample_texture(image, vec2(u, v));
+  Color3 color = sample_texture(image, vec2(u, v));
   return srgb_to_linear(color);
 }
 
@@ -177,7 +182,7 @@ typedef struct {
   Image *texture_emission;
 } PBR_Shader_Data;
 
-internal inline f32 luminance(Vec3 x) {
+internal inline f32 luminance(Color3 x) {
 	return vec3_dot(x, vec3(0.2126f, 0.7152f, 0.0722f));
 }
 
@@ -185,7 +190,7 @@ internal inline f32 fresnel_schlick_f32(f32 f0, f32 f90, f32 theta) {
   return f0 + (f90 - f0) * pow_f32(1 - theta, 5);
 }
 
-internal inline Vec3 fresnel_schlick_vec3(Vec3 f0, f32 f90, f32 theta) {
+internal inline Vec3 fresnel_schlick_vec3(Color3 f0, f32 f90, f32 theta) {
   return vec3_add(f0, vec3_scale(vec3_sub(vec3_broadcast(f90), f0), pow_f32(1 - theta, 5)));
 }
 
@@ -235,7 +240,7 @@ internal inline f32 pdf_GGX_VNDF(f32 NoH, f32 NoV, f32 roughness) {
   return (D * G1) / max(0.00001f, 4.0f * NoV);
 }
 
-internal inline Vec3 disney_eval_diffuse(Color3 base_color, f32 NoL, f32 NoV, f32 LoH, f32 roughness) {
+internal inline Color3 disney_eval_diffuse(Color3 base_color, f32 NoL, f32 NoV, f32 LoH, f32 roughness) {
   f32 FD90 = 0.5f + 2 * roughness * LoH * LoH;
   f32 a = fresnel_schlick_f32(1.0f, FD90, NoL);
   f32 b = fresnel_schlick_f32(1.0f, FD90, NoV);
@@ -243,21 +248,21 @@ internal inline Vec3 disney_eval_diffuse(Color3 base_color, f32 NoL, f32 NoV, f3
   return vec3_scale(base_color, (a * b / PI));
 }
 
-internal inline Vec3 disney_eval_specular(f32 roughness, Vec3 F, f32 NoH, f32 NoV, f32 NoL) {
+internal inline Color3 disney_eval_specular(f32 roughness, Color3 F, f32 NoH, f32 NoV, f32 NoL) {
   f32 D = distribution_GGX(roughness, NoH, 2);
   f32 G = geometry_term(NoL, NoV, roughness);
 
   return vec3_scale(F, D * G / (4 * NoL * NoV));
 }
 
-internal inline f32 shadowed_f90(Vec3 f0) {
-	const float t = 1.0f / 0.04f;
+internal inline f32 shadowed_f90(Color3 f0) {
+	const f32 t = 1.0f / 0.04f;
 	return min(1.0f, t * luminance(f0));
 }
 
 typedef struct {
-  f32  roughness, metalness, sheen, sheen_tint, anisotropic_aspect;
-  Vec3 base_color;
+  f32    roughness, metalness, sheen, sheen_tint, anisotropic_aspect;
+  Color3 base_color;
 } Disney_BRDF_Data;
 
 Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir) {
@@ -269,8 +274,8 @@ Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir
   f32  alpha_y      = (data->roughness * data->roughness) * aspect;
   Vec3 micro_normal = sample_GGX_VNDF(in_dir, alpha_x, alpha_y);
 
-  Vec3 f0      = vec3_lerp(vec3_broadcast(0.04f), data->base_color, data->metalness);
-	Vec3 fresnel = fresnel_schlick_vec3(f0, shadowed_f90(f0), vec3_dot(in_dir, micro_normal));
+  Color3 f0      = vec3_lerp(vec3_broadcast(0.04f), data->base_color, data->metalness);
+	Color3 fresnel = fresnel_schlick_vec3(f0, shadowed_f90(f0), vec3_dot(in_dir, micro_normal));
 
   f32 diffuse_weight  = 1 - data->metalness;
   f32 specular_weight = luminance(fresnel);
@@ -292,8 +297,8 @@ Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir
     f32 LoH = vec3_dot(*out_dir, micro_normal);
     f32 pdf = NoL / PI;
     
-    Vec3 diff = vec3_mul(disney_eval_diffuse(data->base_color, NoL, NoV, LoH, data->roughness), vec3_sub(vec3(1, 1, 1), fresnel));
-         diff = vec3_add(diff, disney_evaluate_sheen(data->sheen, data->base_color, data->sheen_tint, LoH));
+    Color3 diff = vec3_mul(disney_eval_diffuse(data->base_color, NoL, NoV, LoH, data->roughness), vec3_sub(vec3(1, 1, 1), fresnel));
+           diff = vec3_add(diff, disney_evaluate_sheen(data->sheen, data->base_color, data->sheen_tint, LoH));
     brdf = vec4(
       diff.r * NoL,
       diff.g * NoL,
@@ -331,7 +336,7 @@ internal void disney_shader_proc(rawptr _data, Shader_Input const *input, Shader
   PBR_Shader_Data const *data = (PBR_Shader_Data *)_data;
   Vec3 normal = normal_map_apply(data->texture_normal, data->normal_map_strength, input);
 
-  Vec3 base_color = data->base_color;
+  Color3 base_color = data->base_color;
   if (data->texture_albedo) {
     base_color = vec3_mul(base_color, srgb_to_linear(sample_texture(data->texture_albedo, input->tex_coords)));
   }
@@ -486,7 +491,7 @@ i32 main() {
   // f32 angle    = PI / 6.0f;
   // f32 distance = 2;
 
-  scene.camera.view_matrix = MATRIX_4X4_IDENTITY;
+  scene.camera.view_matrix = matrix_4x4_translation_rotation_scale(vec3(0, 0, 3), vec4(0, 0, 0, 1), vec3(1, 1, 1));
   // scene.camera.position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
   // scene.camera.matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
   scene.camera.fov          = (70.0f / 360.0f) * PI * 2.0;
@@ -517,29 +522,33 @@ i32 main() {
     .proc = disney_shader_proc,
   };
 
-  // slice_iter_v(obj.triangles, t, i, {
-  //   IDX(triangles, i) = (Triangle) {
-  //     .a            = t.a.position,
-  //     .b            = t.b.position,
-  //     .c            = t.c.position,
-  //     .normal_a     = t.a.normal,
-  //     .normal_b     = t.b.normal,
-  //     .normal_c     = t.c.normal,
-  //     .tex_coords_a = t.a.tex_coords,
-  //     .tex_coords_b = t.b.tex_coords,
-  //     .tex_coords_c = t.c.tex_coords,
-  //     .shader       = shader,
-  //   };
-  // });
+  slice_iter_v(obj.triangles, t, i, {
+    IDX(triangles, i) = (Triangle) {
+      .a            = t.a.position,
+      .b            = t.b.position,
+      .c            = t.c.position,
+      .normal_a     = t.a.normal,
+      .normal_b     = t.b.normal,
+      .normal_c     = t.c.normal,
+      .tex_coords_a = t.a.tex_coords,
+      .tex_coords_b = t.b.tex_coords,
+      .tex_coords_c = t.c.tex_coords,
+      .shader       = shader,
+    };
+  });
 
-  Byte_Slice gltf_data = unwrap_err(read_entire_file_path(LIT("helmet.gltf"), context.allocator));
+  String gltf_path = LIT("DamagedHelmet.glb");
+
+  Byte_Slice glb_data = unwrap_err_msg(read_entire_file_path(gltf_path, context.allocator), "Failed to open gltf file");
+
+  Growing_Arena_Allocator gltf_arena;
+  Allocator gltf_allocator = growing_arena_allocator_init(&gltf_arena, 1 << 16, context.allocator);
 
   Gltf_File gltf;
-  gltf_parse_file(bytes_to_string(gltf_data), &gltf, context.allocator);
-  gltf_load_buffers(LIT(""), &gltf, context.allocator);
-  Gltf_Triangle_Vector gltf_triangles;
-  vector_init(&gltf_triangles, 0, 8, context.allocator);
-  gltf_to_triangles(&gltf, &gltf_triangles);
+  b8 gltf_parse_ok = gltf_parse(glb_data, gltf_path, &gltf, gltf_allocator);
+  assert(gltf_parse_ok);
+  b8 gltf_load_buffers_ok = gltf_load_buffers(gltf_path, &gltf, gltf_allocator);
+  assert(gltf_load_buffers_ok);
 
   slice_iter_v(gltf.nodes, node, i, {
     if (node.camera != -1) {
@@ -556,28 +565,17 @@ i32 main() {
     }
   });
 
-  slice_init(&triangles, gltf_triangles.len, context.allocator);
-  n_triangles = gltf_triangles.len;
-
   Slice(Shader) gltf_shaders;
-  slice_init(&gltf_shaders, gltf.materials.len, context.allocator);
+  slice_init(&gltf_shaders, gltf.materials.len, gltf_allocator);
 
   Slice(PBR_Shader_Data) gltf_shader_data;
-  slice_init(&gltf_shader_data, gltf.materials.len, context.allocator);
+  slice_init(&gltf_shader_data, gltf.materials.len, gltf_allocator);
 
   Slice(Image) gltf_images;
-  slice_init(&gltf_images, gltf.images.len, context.allocator);
+  slice_init(&gltf_images, gltf.images.len, gltf_allocator);
 
   slice_iter_v(gltf.images, image, i, {
-    Byte_Slice data;
-    if (image.buffer_view != -1) {
-      Gltf_Buffer_View view = IDX(gltf.buffer_views, image.buffer_view);
-      Gltf_Buffer buffer = IDX(gltf.buffers, view.buffer);
-      data = slice_range(buffer.data, view.byte_offset, view.byte_offset + view.byte_length);
-    } else {
-      data = image.data;
-    }
-    fmt_printflnc("type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, data.len);
+    fmt_printflnc("type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, image.data.len);
   });
 
   slice_iter_v(gltf.materials, material, i, {
@@ -593,6 +591,9 @@ i32 main() {
       .anisotropic_aspect = 1,
     };
     if (material.normal_texture.index != -1) {
+      Gltf_Texture *texture = &IDX(gltf.textures, material.normal_texture.index);
+      Gltf_Image   *image   = &IDX(gltf.images,   texture->source);
+      Gltf_Sampler *sampler = &IDX(gltf.samplers, texture->sampler);
     }
     IDX(gltf_shader_data, i) = data;
     IDX(gltf_shaders, i) = (Shader) {
@@ -600,6 +601,12 @@ i32 main() {
       .proc = disney_shader_proc,
     };
   });
+
+  Gltf_Triangle_Vector gltf_triangles;
+  vector_init(&gltf_triangles, 0, 8, context.allocator);
+  gltf_to_triangles(&gltf, &gltf_triangles);
+  slice_init(&triangles, gltf_triangles.len, context.allocator);
+  n_triangles = gltf_triangles.len;
 
   slice_iter_v(gltf_triangles, t, i, {
     IDX(triangles, i) = (Triangle) {
@@ -619,7 +626,7 @@ i32 main() {
       .shader = shader,
     };
   });
-  
+
   Timestamp bvh_start_time = time_now();
   scene_init(&scene, triangles, context.allocator);
   fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
@@ -654,12 +661,12 @@ i32 main() {
 
   String bar = LIT("====================");
   while (!rendering_context_is_finished(&rendering_context)) {
-    isize  c   = rendering_context._current_chunk;
-    f32    p   = c / (f32)((i32)n_chunks);
+    isize  c = rendering_context._current_chunk;
+    f32    p = c / (f32)((i32)n_chunks);
     if (p > 1.0f) {
       p = 1.0f;
     }
-    fmt_printfc("\r[%-20S] %d%%", slice_end(bar, p * 20), (i32)(100 * p));
+    fmt_printfc("\r[%-20S] %d%%", slice_end(bar, p * bar.len), (i32)(100 * p));
     time_sleep(Millisecond * 500);
   }
   fmt_printflnc("\r[%S] 100%%", bar);
