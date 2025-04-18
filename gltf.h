@@ -230,5 +230,9 @@ typedef Slice(Gltf_Triangle) Gltf_Triangle_Slice;
   
 extern b8 gltf_parse(Byte_Slice data, String path, Gltf_File *gltf, Allocator allocator);
 extern b8 gltf_parse_file(String data, Gltf_File *gltf, Allocator allocator);
+extern b8 gltf_parse_glb(Byte_Slice data, String path, Gltf_File *file, Allocator allocator);
 extern b8 gltf_load_buffers(String path, Gltf_File *file, Allocator allocator);
 extern b8 gltf_to_triangles(Gltf_File const *file, Gltf_Triangle_Vector *triangles);
+
+// please don't use this, just put the whole thing on an arena
+extern void gltf_file_destroy(Gltf_File *gltf, Allocator allocator);
