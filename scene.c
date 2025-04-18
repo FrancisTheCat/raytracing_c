@@ -1,6 +1,7 @@
 #include "codin/codin.h"
 
 #include "codin/allocators.h"
+#include "codin/fmt.h"
 #include "codin/io.h"
 #include "codin/sort.h"
 
@@ -80,8 +81,8 @@ extern b8 scene_load_bytes(Byte_Slice data, Scene *scene) {
 }
 
 internal void triangles_init(Triangles *triangles, isize len, isize cap, Allocator allocator) {
-  if (cap % 8) {
-    cap += 8 - cap % 8;
+  if (cap % SIMD_WIDTH) {
+    cap += SIMD_WIDTH - cap % SIMD_WIDTH;
   }
   triangles->len       = len;
   triangles->cap       = cap;
@@ -110,7 +111,7 @@ internal void triangles_destroy(Triangles *triangles) {
 
 internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
   if (triangles->len + v.len >= triangles->cap) {
-    isize new_cap = max(triangles->cap * 2, 8);
+    isize new_cap = max(triangles->cap * 2, SIMD_WIDTH);
     if (triangles->cap + v.len > new_cap) {
       new_cap  = triangles->cap * 2 + ((v.len + SIMD_WIDTH + 1) / SIMD_WIDTH) * SIMD_WIDTH;
     }
@@ -256,7 +257,57 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
   );
 }
 
+internal isize bvh_required_depth(isize n_triangles) {
+  n_triangles /= SIMD_WIDTH;
+
+  isize n = 1, i = 0;
+  while (n < n_triangles) {
+    n *= SIMD_WIDTH;
+    i += 1;
+  }
+  return i;
+}
+
+internal isize bvh_n_leaf_nodes(isize depth) {
+  isize n = 1;
+  for_range(i, 0, depth) {
+    n *= SIMD_WIDTH;
+  }
+  return n;
+}
+
+internal isize bvh_n_internal_nodes(isize depth) {
+  isize n = 1;
+  isize nodes = 0;
+  for_range(i, 0, depth) {
+    nodes += n;
+    n     *= SIMD_WIDTH;
+  }
+  return nodes;
+}
+
+internal isize bvh_partition_triangles(isize n_triangles, isize per_child) {
+  isize n = 0, left = n_triangles;
+  while (n < n_triangles / 2 && left > per_child) {
+    n    += per_child;
+    left -= n_triangles;
+  }
+  return n;
+}
+
 internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
+  isize depth      = bvh_required_depth(triangles.len);
+  // isize n_internal = bvh_n_internal_nodes(depth);
+  isize n_leaves   = bvh_n_leaf_nodes(depth);
+
+  // fmt_printflnc("triangles: %d", triangles.len);
+  // fmt_printflnc("depth:     %d", depth);
+  // fmt_printflnc("internal:  %d", n_internal);
+  // fmt_printflnc("leaves:    %d", n_leaves);
+  // process_exit(0);
+
+  isize per_child = n_leaves;
+
   if (triangles.len <= SIMD_WIDTH) {
     BVH_Index idx = { .index = scene->triangles.len, .leaf = true, };
     triangles_append(&scene->triangles, triangles);
@@ -268,45 +319,97 @@ internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
   }
 
   Triangle_Slice slices[SIMD_WIDTH] = { triangles, };
-  isize n_slices = 1;
+  isize        n_slices = 1;
 
-  while (n_slices < SIMD_WIDTH) {
-    isize _n_slices = n_slices;
-    for_range(slice_i, 0, _n_slices) {
-      Triangle_Slice slice = slices[slice_i];
-      if (slice.len <= SIMD_WIDTH) {
-        n_slices += 1;
-        continue;
-      }
-      f32 min_surface_area = F32_INFINITY;
-      i32 best_axis = 0;
-      for_range(axis, 0, 3) {
-        sort_triangle_slice(slice, axis);
-        AABB a, b;
-        aabb_triangle_slice(slice_end(slice,   slice.len / 2), &a);
-        aabb_triangle_slice(slice_start(slice, slice.len / 2), &b);
-        f32 surface_area = aabb_surface_area(&a) + aabb_surface_area(&b);
-        if (surface_area <= min_surface_area) {
-          min_surface_area = surface_area;
-          best_axis        = axis;
-        }
-      }
+  Triangle_Slice finished[SIMD_WIDTH] = {0};
+  isize        n_finished = 0;
 
-      if (best_axis != 2) {
-        sort_triangle_slice(slice, best_axis);
-      }
+  while (n_slices != 0) {
+    n_slices -= 1;
+    Triangle_Slice slice = slices[n_slices];
+    if (slice.len <= per_child) {
+      panic("");
+    }
 
-      slices[slice_i ] = slice_end(slice,   slice.len / 2);
-      slices[n_slices] = slice_start(slice, slice.len / 2);
+    isize split = bvh_partition_triangles(slice.len, per_child);
+    // fmt_printflnc("n: %d, split: %d, per_child: %d", slice.len, split, per_child);
+
+    Triangle_Slice left, right;
+    left  = slice_end(slice,   split);
+    right = slice_start(slice, split);
+    
+    f32 min_surface_area = F32_INFINITY;
+    i32 best_axis = 0;
+    for_range(axis, 0, 3) {
+      sort_triangle_slice(slice, axis);
+      AABB a, b;
+      aabb_triangle_slice(left,  &a);
+      aabb_triangle_slice(right, &b);
+      f32 surface_area = aabb_surface_area(&a) + aabb_surface_area(&b);
+      if (surface_area <= min_surface_area) {
+        min_surface_area = surface_area;
+        best_axis        = axis;
+      }
+    }
+
+    if (best_axis != 2) {
+      sort_triangle_slice(slice, best_axis);
+    }
+
+    assert(n_slices   < count_of(slices));
+    assert(n_finished < count_of(finished));
+
+    if (left.len > per_child) {
+      slices[n_slices] = left;
       n_slices += 1;
+    } else if (left.len) {
+      finished[n_finished] = left;
+      n_finished += 1;
+    }
+    if (right.len > per_child) {
+      slices[n_slices] = right;
+      n_slices += 1;
+    } else if (right.len) {
+      finished[n_finished] = right;
+      n_finished += 1;
     }
   }
+
+  // [ 0, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, ]
+  // [ 0, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, ]
+
+  // child i of node n:
+  // n + 1 + i * internal_nodes(depth - 1)
+
+  // [
+  //   0,
+  //   1, 1,
+  //   2, 2, 2, 2,
+  //   4, 4, 4, 4, 4, 4, 4, 4,
+  //   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+  //   6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+  //   7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+  // ]
+  //
+  // child i of node n:
+  // N ^ depth
 
   BVH_Node node = {0};
   BVH_Index index = (BVH_Index) { .index = scene->bvh.nodes.len, .leaf = false, };
   vector_append(&scene->bvh.nodes, node);
 
-  slice_iter_v(slice_array(Slice(Triangle_Slice), slices), tris, i, {
+  // slice_iter_v(slice_array(Slice(Triangle_Slice), finished), tris, i, {
+  //   if (i) {
+  //     fmt_printc(", ");
+  //   }
+  //   fmt_printfc("%d", tris.len);
+  // });
+  // fmt_printlnc("");
+
+  slice_iter_v(slice_array(Slice(Triangle_Slice), finished), tris, i, {
+    if (i >= n_finished) {
+      break;
+    }
     AABB aabb;
     aabb_triangle_slice(tris, &aabb);
 
@@ -319,14 +422,24 @@ internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
     node.maxs.z[i] = aabb.max.z;
 
     node.children[i] = bvh_build(scene, tris);
+    if (!node.children[i].leaf) {
+      assert(node.children[i].index == index.index + 1 + i * bvh_n_internal_nodes(depth - 1));
+    }
   });
 
   IDX(scene->bvh.nodes, index.index) = node;
   return index;
 }
 
-extern void scene_init(Scene *scene, Triangle_Slice src_triangles, Allocator allocator) {
-  vector_init(&scene->bvh.nodes, 0, 8, allocator);
-  triangles_init(&scene->triangles, 0, src_triangles.len, allocator);
-  scene->bvh.root = bvh_build(scene, src_triangles);
+extern void scene_init(Scene *scene, Triangle_Slice triangles, Allocator allocator) {
+  isize depth      = bvh_required_depth(triangles.len);
+  isize n_internal = bvh_n_internal_nodes(depth);
+
+  vector_init(&scene->bvh.nodes, 0, n_internal, allocator);
+  triangles_init(&scene->triangles, 0, ((triangles.len + SIMD_WIDTH) / SIMD_WIDTH) * SIMD_WIDTH, allocator);
+
+  scene->triangles.allocator = panic_allocator();
+  scene->bvh.nodes.allocator = panic_allocator();
+  
+  scene->bvh.root = bvh_build(scene, triangles);
 }

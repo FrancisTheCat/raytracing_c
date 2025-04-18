@@ -84,8 +84,8 @@ STATIC_ASSERT(size_of(BVH_Index) == size_of(i32));
   } BVH_Node;
 #elif SIMD_WIDTH == 16
   typedef struct {
-    Vec3x16    mins;
-    Vec3x16    maxs;
+    Vec3x16   mins;
+    Vec3x16   maxs;
     BVH_Index children[16];
   } BVH_Node;
 #endif
