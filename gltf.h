@@ -199,6 +199,8 @@ typedef struct {
   String                  path;
   isize                   scene;
   Gltf_Asset              asset;
+  Slice(String)           used_extensions;
+  Slice(String)           required_extensions;
   Slice(Gltf_Node)        nodes;
   Slice(Gltf_Scene)       scenes;
   Slice(Gltf_Mesh)        meshes;
@@ -226,6 +228,7 @@ typedef struct {
 typedef Vector(Gltf_Triangle) Gltf_Triangle_Vector;
 typedef Slice(Gltf_Triangle) Gltf_Triangle_Slice;
   
+extern b8 gltf_parse(Byte_Slice data, String path, Gltf_File *gltf, Allocator allocator);
 extern b8 gltf_parse_file(String data, Gltf_File *gltf, Allocator allocator);
 extern b8 gltf_load_buffers(String path, Gltf_File *file, Allocator allocator);
 extern b8 gltf_to_triangles(Gltf_File const *file, Gltf_Triangle_Vector *triangles);

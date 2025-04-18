@@ -2,6 +2,7 @@
 
 #include "codin/json.h"
 #include "codin/os.h"
+#include "codin/fmt.h"
 #include "codin/strings.h"
 
 #include "uri.h"
@@ -901,6 +902,14 @@ extern b8 gltf_parse_file(String data, Gltf_File *gltf, Allocator allocator) {
       if (!gltf_parse_asset(gltf, &parser)) {
         return false;
       }
+    STRING_CASE_C("extensionsRequired")
+      if (!gltf_parse_extensions_required(gltf, &parser)) {
+        return false;
+      }
+    STRING_CASE_C("extensionsUsed")
+      if (!gltf_parse_extensions_used(gltf, &parser)) {
+        return false;
+      }
     STRING_CASE_C("scene")
       if (parser.value.kind != Json_Value_Number) {
         return false;
@@ -964,7 +973,6 @@ typedef struct {
 
 typedef struct {
   u32 length, type;
-  u8  data[0];
 } Glb_Chunk_Header;
 
 typedef enum {
@@ -997,12 +1005,13 @@ internal b8 gltf_parse_glb(Byte_Slice data, String path, Gltf_File *file, Alloca
   if (chunk_header.type != 0x4E4F534A) {
     return false;
   }
+  cursor += size_of(chunk_header);
   if (cursor + chunk_header.length > data.len) {
     return false;
   }
 
   String json_data = {
-    .data = (char *)chunk_header.data,
+    .data = (char *)data.data + cursor,
     .len  = chunk_header.length,
   };
 
@@ -1011,31 +1020,32 @@ internal b8 gltf_parse_glb(Byte_Slice data, String path, Gltf_File *file, Alloca
     return false;
   }
 
-  cursor += size_of(chunk_header) + chunk_header.length;
+  cursor += chunk_header.length;
 
   if (cursor == data.len) {
     return true;
   }
 
-  if (cursor + size_of(chunk_header) < data.len) {
+  if (cursor + size_of(chunk_header) > data.len) {
     return false;
   }
   mem_copy(&chunk_header, data.data + cursor, size_of(chunk_header));
   if (chunk_header.type != 0x004E4942) {
     return false;
   }
+  cursor += size_of(chunk_header);
   if (cursor + chunk_header.length > data.len) {
     return false;
   }
   file->glb_data = (Byte_Slice) {
-    .data = chunk_header.data,
+    .data = data.data + cursor,
     .len  = chunk_header.length,
   };
 
   return true;
 }
 
-internal b8 gltf_parse(Byte_Slice data, String path, Gltf_File *gltf, Allocator allocator) {
+extern b8 gltf_parse(Byte_Slice data, String path, Gltf_File *gltf, Allocator allocator) {
   if (data.len < 4) {
     return false;
   }

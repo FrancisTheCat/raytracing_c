@@ -445,15 +445,24 @@ internal inline void ray_spheres_hit_16(
 
 #endif
 
-internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit *hit) {
+internal void ray_bvh_node_hit(
+  Ray            *ray,
+  Scene    const *scene,
+  BVH_Node       *node,
+  Hit            *hit,
+  isize           offset,
+  isize           depth
+) {
   f32 distances[SIMD_WIDTH] __attribute__((aligned(SIMD_ALIGN)));
   ray_aabbs_hit_SIMD(ray, EPSILON, hit->distance, node->mins, node->maxs, &distances[0]);
+
+  isize n_leaves = bvh_n_leaf_nodes(depth);
 
   // NOTE(Franz): this depth sorting is, tho substantially more complicated than the naive approach
   // the idea is that we do the near collisions first, which we can then compare to the upper bound
   // for the distance given by the aabb hit check.
   for_range(i, 0, SIMD_WIDTH) {
-    f32 min_distance = F32_INFINITY;
+    f32 min_distance = hit->distance;
     i32 min_index    = -1;
 
     for_range(j, 0, SIMD_WIDTH) {
@@ -467,11 +476,11 @@ internal void ray_bvh_node_hit(Ray *ray, Scene const *scene, BVH_Node *node, Hit
       return;
     }
 
-    BVH_Index idx = node->children[min_index];
-    if (idx.leaf) {
-      ray_triangles_hit_SIMD(ray, &scene->triangles, idx.index, hit);
+    if (depth == 1) {
+      ray_triangles_hit_SIMD(ray, &scene->triangles, offset + min_index * SIMD_WIDTH, hit);
     } else {
-      ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, idx.index), hit);
+      BVH_Node *child = node + 1 + min_index * bvh_n_internal_nodes(depth - 1);
+      ray_bvh_node_hit(ray, scene, child, hit, offset + n_leaves * min_index, depth - 1);
     }
     
     distances[min_index] = F32_INFINITY;
@@ -494,11 +503,7 @@ internal void ray_scene_hit(Ray *ray, Scene const *scene, Hit *hit) {
 #if 0
   ray_triangles_hit(ray, &scene->triangles, hit);
 #else
-  if (scene->bvh.root.leaf) {
-    ray_triangles_hit_SIMD(ray, &scene->triangles, scene->bvh.root.index, hit);
-  } else {
-    ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, scene->bvh.root.index), hit);
-  }
+  ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, 0), hit, 0, scene->bvh.depth);
 #endif
 }
 

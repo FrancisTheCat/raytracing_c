@@ -10,7 +10,7 @@
 
 typedef struct __attribute__((aligned(32))) {
   i32       version, n_nodes, n_triangles;
-  BVH_Index root;
+  i32 root;
   u8        _padding[16];
 } Scene_File_Header;
 
@@ -19,7 +19,6 @@ extern void scene_save_writer(Writer const *w, Scene const *scene) {
     .version     = 0,
     .n_nodes     = scene->bvh.nodes.len,
     .n_triangles = scene->triangles.cap,
-    .root        = scene->bvh.root,
   };
   write_any(w, &header);
   Byte_Slice node_data = slice_to_bytes(scene->bvh.nodes);
@@ -43,8 +42,6 @@ extern b8 scene_load_bytes(Byte_Slice data, Scene *scene) {
   if (data.len != size_of(header) + header.n_nodes * size_of(BVH_Node) + TRIANGLES_ALLOCATION_SIZE(header.n_triangles)) {
     return false;
   }
-
-  scene->bvh.root = header.root;
 
   scene->bvh.nodes.len  = header.n_nodes;
   scene->bvh.nodes.cap  = header.n_nodes;
@@ -258,7 +255,7 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
 }
 
 internal isize bvh_required_depth(isize n_triangles) {
-  n_triangles /= SIMD_WIDTH;
+  n_triangles = (n_triangles + SIMD_WIDTH - 1) / SIMD_WIDTH;
 
   isize n = 1, i = 0;
   while (n < n_triangles) {
@@ -295,10 +292,8 @@ internal isize bvh_partition_triangles(isize n_triangles, isize per_child) {
   return n;
 }
 
-internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
-  isize depth      = bvh_required_depth(triangles.len);
-  // isize n_internal = bvh_n_internal_nodes(depth);
-  isize n_leaves   = bvh_n_leaf_nodes(depth);
+internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
+  isize n_leaves = bvh_n_leaf_nodes(depth);
 
   // fmt_printflnc("triangles: %d", triangles.len);
   // fmt_printflnc("depth:     %d", depth);
@@ -309,13 +304,12 @@ internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
   isize per_child = n_leaves;
 
   if (triangles.len <= SIMD_WIDTH) {
-    BVH_Index idx = { .index = scene->triangles.len, .leaf = true, };
     triangles_append(&scene->triangles, triangles);
     while (scene->triangles.len % SIMD_WIDTH) {
       scene->triangles.len += 1;
     }
     assert(scene->triangles.len <= scene->triangles.cap);
-    return idx;
+    return;
   }
 
   Triangle_Slice slices[SIMD_WIDTH] = { triangles, };
@@ -381,21 +375,8 @@ internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
   // child i of node n:
   // n + 1 + i * internal_nodes(depth - 1)
 
-  // [
-  //   0,
-  //   1, 1,
-  //   2, 2, 2, 2,
-  //   4, 4, 4, 4, 4, 4, 4, 4,
-  //   5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-  //   6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-  //   7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-  // ]
-  //
-  // child i of node n:
-  // N ^ depth
-
   BVH_Node node = {0};
-  BVH_Index index = (BVH_Index) { .index = scene->bvh.nodes.len, .leaf = false, };
+  isize index = scene->bvh.nodes.len;
   vector_append(&scene->bvh.nodes, node);
 
   // slice_iter_v(slice_array(Slice(Triangle_Slice), finished), tris, i, {
@@ -421,19 +402,17 @@ internal BVH_Index bvh_build(Scene *scene, Triangle_Slice triangles) {
     node.maxs.y[i] = aabb.max.y;
     node.maxs.z[i] = aabb.max.z;
 
-    node.children[i] = bvh_build(scene, tris);
-    if (!node.children[i].leaf) {
-      assert(node.children[i].index == index.index + 1 + i * bvh_n_internal_nodes(depth - 1));
-    }
+    bvh_build(scene, tris, depth - 1);
   });
 
-  IDX(scene->bvh.nodes, index.index) = node;
-  return index;
+  IDX(scene->bvh.nodes, index) = node;
+  return;
 }
 
 extern void scene_init(Scene *scene, Triangle_Slice triangles, Allocator allocator) {
   isize depth      = bvh_required_depth(triangles.len);
   isize n_internal = bvh_n_internal_nodes(depth);
+  scene->bvh.depth = depth;
 
   vector_init(&scene->bvh.nodes, 0, n_internal, allocator);
   triangles_init(&scene->triangles, 0, ((triangles.len + SIMD_WIDTH) / SIMD_WIDTH) * SIMD_WIDTH, allocator);
@@ -441,5 +420,5 @@ extern void scene_init(Scene *scene, Triangle_Slice triangles, Allocator allocat
   scene->triangles.allocator = panic_allocator();
   scene->bvh.nodes.allocator = panic_allocator();
   
-  scene->bvh.root = bvh_build(scene, triangles);
+  bvh_build(scene, triangles, depth);
 }

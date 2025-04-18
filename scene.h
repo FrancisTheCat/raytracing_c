@@ -69,30 +69,21 @@ typedef struct {
   rawptr          data;
 } Background;
 
-typedef struct {
-  i32 index: 31;
-  b8  leaf:   1;
-} BVH_Index;
-
-STATIC_ASSERT(size_of(BVH_Index) == size_of(i32));
-
 #if SIMD_WIDTH == 8
   typedef struct {
-    Vec3x8    mins;
-    Vec3x8    maxs;
-    BVH_Index children[8];
+    Vec3x8 mins;
+    Vec3x8 maxs;
   } BVH_Node;
 #elif SIMD_WIDTH == 16
   typedef struct {
-    Vec3x16   mins;
-    Vec3x16   maxs;
-    BVH_Index children[16];
+    Vec3x16 mins;
+    Vec3x16 maxs;
   } BVH_Node;
 #endif
 
 typedef struct {
   Vector(BVH_Node) nodes;
-  BVH_Index        root;
+  isize            depth;
 } BVH;
 
 typedef struct {

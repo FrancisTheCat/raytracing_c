@@ -532,11 +532,13 @@ i32 main() {
   //   };
   // });
 
-  Byte_Slice gltf_data = unwrap_err(read_entire_file_path(LIT("helmet.gltf"), context.allocator));
+  String gltf_path = LIT("sheen.glb");
+  Byte_Slice gltf_data = unwrap_err(read_entire_file_path(gltf_path, context.allocator));
 
   Gltf_File gltf;
-  gltf_parse_file(bytes_to_string(gltf_data), &gltf, context.allocator);
-  gltf_load_buffers(LIT(""), &gltf, context.allocator);
+  b8 gltf_ok = gltf_parse(gltf_data, gltf_path, &gltf, context.allocator);
+  assert(gltf_ok);
+  gltf_load_buffers(gltf_path, &gltf, context.allocator);
   Gltf_Triangle_Vector gltf_triangles;
   vector_init(&gltf_triangles, 0, 8, context.allocator);
   gltf_to_triangles(&gltf, &gltf_triangles);
@@ -593,6 +595,14 @@ i32 main() {
       .anisotropic_aspect = 1,
     };
     if (material.normal_texture.index != -1) {
+    }
+    if (material.emissive_texture.index != -1) {
+    }
+    if (material.occlusion_texture.index != -1) {
+    }
+    if (material.pbr_metallic_roughness.base_color_texture.index != -1) {
+    }
+    if (material.pbr_metallic_roughness.metallic_roughness_texture.index != -1) {
     }
     IDX(gltf_shader_data, i) = data;
     IDX(gltf_shaders, i) = (Shader) {
