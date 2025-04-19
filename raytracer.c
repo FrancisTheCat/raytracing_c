@@ -105,17 +105,17 @@ internal inline b8 ray_triangles_hit_8(
   ray_origin.z = _mm256_set1_ps(ray->position.z);
 
   Vec3x8 a, b, c;
-  a.x = _mm256_load_ps(triangles->a_x + offset);
-  a.y = _mm256_load_ps(triangles->a_y + offset);
-  a.z = _mm256_load_ps(triangles->a_z + offset);
+  a.x = _mm256_load_ps(triangles->x[0] + offset);
+  a.y = _mm256_load_ps(triangles->y[0] + offset);
+  a.z = _mm256_load_ps(triangles->z[0] + offset);
   
-  b.x = _mm256_load_ps(triangles->b_x + offset);
-  b.y = _mm256_load_ps(triangles->b_y + offset);
-  b.z = _mm256_load_ps(triangles->b_z + offset);
+  b.x = _mm256_load_ps(triangles->x[1] + offset);
+  b.y = _mm256_load_ps(triangles->y[1] + offset);
+  b.z = _mm256_load_ps(triangles->z[1] + offset);
   
-  c.x = _mm256_load_ps(triangles->c_x + offset);
-  c.y = _mm256_load_ps(triangles->c_y + offset);
-  c.z = _mm256_load_ps(triangles->c_z + offset);
+  c.x = _mm256_load_ps(triangles->x[2] + offset);
+  c.y = _mm256_load_ps(triangles->y[2] + offset);
+  c.z = _mm256_load_ps(triangles->z[2] + offset);
 
   Vec3x8 edge1, edge2;
   edge1.x = b.x - a.x;
@@ -751,9 +751,9 @@ extern void lightmap_bake(Image const *lightmap, Scene const *scene, isize sampl
         
         if (w0 >= -EPSILON && w1 >= -EPSILON && w2 >= -EPSILON) {
           Vec3 position = vec3(
-            .x = scene->triangles.a_x[i] * w0 + scene->triangles.b_x[i] * w1 + scene->triangles.c_x[i] * w2,
-            .y = scene->triangles.a_y[i] * w0 + scene->triangles.b_y[i] * w1 + scene->triangles.c_y[i] * w2,
-            .z = scene->triangles.a_z[i] * w0 + scene->triangles.b_z[i] * w1 + scene->triangles.c_z[i] * w2,
+            .x = scene->triangles.x[0][i] * w0 + scene->triangles.x[1][i] * w1 + scene->triangles.x[2][i] * w2,
+            .y = scene->triangles.y[0][i] * w0 + scene->triangles.y[1][i] * w1 + scene->triangles.y[2][i] * w2,
+            .z = scene->triangles.z[0][i] * w0 + scene->triangles.z[1][i] * w1 + scene->triangles.z[2][i] * w2,
           );
           Vec3 normal = vec3(
             .x = scene->triangles.aos[i].normal_a.x * w0 + scene->triangles.aos[i].normal_b.x * w1 + scene->triangles.aos[i].normal_c.x * w2,

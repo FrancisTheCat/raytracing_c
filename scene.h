@@ -34,9 +34,9 @@ typedef struct {
 } Shader;
 
 typedef struct {
-  Vec3   a, b, c;
-  Vec3   normal_a, normal_b, normal_c;
-  Vec2   tex_coords_a, tex_coords_b, tex_coords_c;
+  Vec3   positions [3];
+  Vec3   normals   [3];
+  Vec2   tex_coords[3];
   Shader shader;
 } Triangle;
 
@@ -49,11 +49,11 @@ typedef struct {
   Shader shader;
 } Triangle_AOS;
 
-// SOA Vector, allocation starts at `a_x` and has a size of TRIANGLE_ALLOCATION_SIZE(N)
+// SOA Vector, allocation starts at `x[0]` and has a size of TRIANGLE_ALLOCATION_SIZE(N)
 typedef struct {
-  f32          *a_x, *a_y, *a_z;
-  f32          *b_x, *b_y, *b_z;
-  f32          *c_x, *c_y, *c_z;
+  f32          *x[3];
+  f32          *y[3];
+  f32          *z[3];
   Triangle_AOS *aos;
   i32           len, cap;
   Allocator     allocator;

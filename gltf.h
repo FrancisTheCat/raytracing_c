@@ -43,26 +43,78 @@ typedef struct {
 } Gltf_Texture_Info;
 
 typedef struct {
-  Color4            base_color_factor;
-  f32               metallic_factor;
-  f32               roughness_factor;
-  Gltf_Texture_Info base_color_texture;
-  Gltf_Texture_Info metallic_roughness_texture;
-} Gltf_PBR_Material;
-
-typedef struct {
   String            name;
-  Gltf_PBR_Material pbr_metallic_roughness;
-  Gltf_Texture_Info emissive_texture;
-  Gltf_Texture_Info normal_texture;
-  Gltf_Texture_Info occlusion_texture;
-  Color3            emissive_factor;
+
+  Gltf_Texture_Info texture_base_color;
+  Gltf_Texture_Info texture_metallic_roughness;
+  Gltf_Texture_Info texture_emissive;
+  Gltf_Texture_Info texture_normal;
+  Gltf_Texture_Info texture_occlusion;
+
+  Gltf_Texture_Info texture_sheen;
+  Gltf_Texture_Info texture_sheen_roughness;
+
+  Gltf_Texture_Info texture_anisotropy;
+
+  Gltf_Texture_Info texture_clearcoat;
+  Gltf_Texture_Info texture_clearcoat_roughness;
+
+  Gltf_Texture_Info texture_specular;
+  Gltf_Texture_Info texture_specular_roughness;
+
+  Color4            base_color;
+  f32               metallic;
+  f32               roughness;
+  Color3            emissive;
+
+  f32               texture_occlusion_strength;
+  f32               texture_normal_scale;
   String            alpha_mode;
   f32               alpha_cutoff;
-  f32               occlusion_texture_strength;
-  f32               normal_texture_scale;
   b8                double_sided;
+
+  Color3            sheen_color;
+  f32               sheen_roughness;
+
+  f32               anisotropy_strength;
+  f32               anisotropy_rotation;
+
+  f32               clearcoat;
+  f32               clearcoat_roughness;
+
+  f32               emissive_strength;
+
+  f32               ior;
+
+  f32               specular;
+  Color3            specular_color;
 } Gltf_Material;
+
+#define GLTF_MATERIAL_DEFAULT                         \
+  (Gltf_Material) {                                   \
+    .alpha_cutoff                 = 0.5f,             \
+    .alpha_mode                   = LIT("OPAQUE"),    \
+    .metallic                     = 1,                \
+    .roughness                    = 1,                \
+    .base_color                   = vec4(1, 1, 1, 1), \
+    .ior                          = 1.5f,             \
+    .specular                     = 1,                \
+    .specular_color               = vec3(1, 1, 1),    \
+    .texture_occlusion_strength   = 1,                \
+    .texture_normal_scale         = 1,                \
+    .texture_base_color           = { .index = -1 },  \
+    .texture_metallic_roughness   = { .index = -1 },  \
+    .texture_emissive             = { .index = -1 },  \
+    .texture_normal               = { .index = -1 },  \
+    .texture_occlusion            = { .index = -1 },  \
+    .texture_sheen                = { .index = -1 },  \
+    .texture_sheen_roughness      = { .index = -1 },  \
+    .texture_anisotropy           = { .index = -1 },  \
+    .texture_clearcoat            = { .index = -1 },  \
+    .texture_clearcoat_roughness  = { .index = -1 },  \
+    .texture_specular             = { .index = -1 },  \
+    .texture_specular_roughness   = { .index = -1 },  \
+  }
 
 typedef enum {
   Gltf_Attribute_Type_Position,
@@ -199,8 +251,8 @@ typedef struct {
   String                  path;
   isize                   scene;
   Gltf_Asset              asset;
-  Slice(String)           used_extensions;
-  Slice(String)           required_extensions;
+  String_Slice            extensions_used;
+  String_Slice            extensions_required;
   Slice(Gltf_Node)        nodes;
   Slice(Gltf_Scene)       scenes;
   Slice(Gltf_Mesh)        meshes;

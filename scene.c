@@ -23,7 +23,7 @@ extern void scene_save_writer(Writer const *w, Scene const *scene) {
   write_any(w, &header);
   Byte_Slice node_data = slice_to_bytes(scene->bvh.nodes);
   Byte_Slice tris_data = {
-    .data = (byte *)scene->triangles.a_x,
+    .data = (byte *)scene->triangles.x[0],
     .len  = TRIANGLES_ALLOCATION_SIZE(scene->triangles.cap),
   };
   write_bytes(w, node_data);
@@ -55,17 +55,17 @@ extern b8 scene_load_bytes(Byte_Slice data, Scene *scene) {
 
   assert((uintptr)tris_data % 32 == 0);
 
-  scene->triangles.a_x = tris_data + header.n_triangles * 0;
-  scene->triangles.a_y = tris_data + header.n_triangles * 1;
-  scene->triangles.a_z = tris_data + header.n_triangles * 2;
+  scene->triangles.x[0] = tris_data + header.n_triangles * 0;
+  scene->triangles.x[1] = tris_data + header.n_triangles * 1;
+  scene->triangles.x[2] = tris_data + header.n_triangles * 2;
 
-  scene->triangles.b_x = tris_data + header.n_triangles * 3;
-  scene->triangles.b_y = tris_data + header.n_triangles * 4;
-  scene->triangles.b_z = tris_data + header.n_triangles * 5;
+  scene->triangles.y[0] = tris_data + header.n_triangles * 3;
+  scene->triangles.y[1] = tris_data + header.n_triangles * 4;
+  scene->triangles.y[2] = tris_data + header.n_triangles * 5;
 
-  scene->triangles.c_x = tris_data + header.n_triangles * 6;
-  scene->triangles.c_y = tris_data + header.n_triangles * 7;
-  scene->triangles.c_z = tris_data + header.n_triangles * 8;
+  scene->triangles.z[0] = tris_data + header.n_triangles * 6;
+  scene->triangles.z[1] = tris_data + header.n_triangles * 7;
+  scene->triangles.z[2] = tris_data + header.n_triangles * 8;
 
   scene->triangles.aos = (Triangle_AOS *)(tris_data + header.n_triangles * 9);
 
@@ -87,23 +87,23 @@ internal void triangles_init(Triangles *triangles, isize len, isize cap, Allocat
 
   f32 *data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(cap), SIMD_ALIGN, allocator));
 
-  triangles->a_x = data + cap * 0;
-  triangles->a_y = data + cap * 1;
-  triangles->a_z = data + cap * 2;
+  triangles->x[0] = data + cap * 0;
+  triangles->x[1] = data + cap * 1;
+  triangles->x[2] = data + cap * 2;
 
-  triangles->b_x = data + cap * 3;
-  triangles->b_y = data + cap * 4;
-  triangles->b_z = data + cap * 5;
+  triangles->y[0] = data + cap * 3;
+  triangles->y[1] = data + cap * 4;
+  triangles->y[2] = data + cap * 5;
 
-  triangles->c_x = data + cap * 6;
-  triangles->c_y = data + cap * 7;
-  triangles->c_z = data + cap * 8;
+  triangles->z[0] = data + cap * 6;
+  triangles->z[1] = data + cap * 7;
+  triangles->z[2] = data + cap * 8;
 
   triangles->aos = (Triangle_AOS *)(data + cap * 9);
 }
 
 internal void triangles_destroy(Triangles *triangles) {
-  mem_free(triangles->a_x, TRIANGLES_ALLOCATION_SIZE(triangles->cap), triangles->allocator);
+  mem_free(triangles->x[0], TRIANGLES_ALLOCATION_SIZE(triangles->cap), triangles->allocator);
 }
 
 internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
@@ -115,31 +115,31 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
     assert(new_cap % 8 == 0);
     f32 *new_data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(new_cap), SIMD_ALIGN, triangles->allocator));
 
-    mem_tcopy(new_data + new_cap * 0, triangles->a_x, triangles->len);
-    mem_tcopy(new_data + new_cap * 1, triangles->a_y, triangles->len);
-    mem_tcopy(new_data + new_cap * 2, triangles->a_z, triangles->len);
+    mem_tcopy(new_data + new_cap * 0, triangles->x[0], triangles->len);
+    mem_tcopy(new_data + new_cap * 1, triangles->x[1], triangles->len);
+    mem_tcopy(new_data + new_cap * 2, triangles->x[2], triangles->len);
 
-    mem_tcopy(new_data + new_cap * 3, triangles->b_x, triangles->len);
-    mem_tcopy(new_data + new_cap * 4, triangles->b_y, triangles->len);
-    mem_tcopy(new_data + new_cap * 5, triangles->b_z, triangles->len);
+    mem_tcopy(new_data + new_cap * 3, triangles->y[0], triangles->len);
+    mem_tcopy(new_data + new_cap * 4, triangles->y[1], triangles->len);
+    mem_tcopy(new_data + new_cap * 5, triangles->y[2], triangles->len);
 
-    mem_tcopy(new_data + new_cap * 6, triangles->c_x, triangles->len);
-    mem_tcopy(new_data + new_cap * 7, triangles->c_y, triangles->len);
-    mem_tcopy(new_data + new_cap * 8, triangles->c_z, triangles->len);
+    mem_tcopy(new_data + new_cap * 6, triangles->z[0], triangles->len);
+    mem_tcopy(new_data + new_cap * 7, triangles->z[1], triangles->len);
+    mem_tcopy(new_data + new_cap * 8, triangles->z[2], triangles->len);
 
     mem_tcopy((Triangle_AOS *)(new_data + new_cap * 9), triangles->aos, triangles->len);
 
-    triangles->a_x = new_data + new_cap * 0;
-    triangles->a_y = new_data + new_cap * 1;
-    triangles->a_z = new_data + new_cap * 2;
+    triangles->x[0] = new_data + new_cap * 0;
+    triangles->x[1] = new_data + new_cap * 1;
+    triangles->x[2] = new_data + new_cap * 2;
 
-    triangles->b_x = new_data + new_cap * 3;
-    triangles->b_y = new_data + new_cap * 4;
-    triangles->b_z = new_data + new_cap * 5;
+    triangles->y[0] = new_data + new_cap * 3;
+    triangles->y[1] = new_data + new_cap * 4;
+    triangles->y[2] = new_data + new_cap * 5;
 
-    triangles->c_x = new_data + new_cap * 6;
-    triangles->c_y = new_data + new_cap * 7;
-    triangles->c_z = new_data + new_cap * 8;
+    triangles->z[0] = new_data + new_cap * 6;
+    triangles->z[1] = new_data + new_cap * 7;
+    triangles->z[2] = new_data + new_cap * 8;
 
     triangles->aos = (Triangle_AOS *)(new_data + new_cap * 9);
 
@@ -147,23 +147,23 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
   }
 
   slice_iter_v(v, t, i, {
-    triangles->a_x[triangles->len + i] = t.a.x;
-    triangles->a_y[triangles->len + i] = t.a.y;
-    triangles->a_z[triangles->len + i] = t.a.z;
+    triangles->x[0][triangles->len + i] = t.positions[0].x;
+    triangles->x[1][triangles->len + i] = t.positions[1].x;
+    triangles->x[2][triangles->len + i] = t.positions[2].x;
 
-    triangles->b_x[triangles->len + i] = t.b.x;
-    triangles->b_y[triangles->len + i] = t.b.y;
-    triangles->b_z[triangles->len + i] = t.b.z;
+    triangles->y[0][triangles->len + i] = t.positions[0].y;
+    triangles->y[1][triangles->len + i] = t.positions[1].y;
+    triangles->y[2][triangles->len + i] = t.positions[2].y;
 
-    triangles->c_x[triangles->len + i] = t.c.x;
-    triangles->c_y[triangles->len + i] = t.c.y;
-    triangles->c_z[triangles->len + i] = t.c.z;
+    triangles->z[0][triangles->len + i] = t.positions[0].z;
+    triangles->z[1][triangles->len + i] = t.positions[1].z;
+    triangles->z[2][triangles->len + i] = t.positions[2].z;
 
-    Vec3 edge1 = vec3_sub(vec3(t.b.x, t.b.y, t.b.z), vec3(t.a.x, t.a.y, t.a.z));
-    Vec3 edge2 = vec3_sub(vec3(t.c.x, t.c.y, t.c.z), vec3(t.a.x, t.a.y, t.a.z));
+    Vec3 edge1 = vec3_sub(vec3(t.positions[1].x, t.positions[1].y, t.positions[1].z), vec3(t.positions[0].x, t.positions[0].y, t.positions[0].z));
+    Vec3 edge2 = vec3_sub(vec3(t.positions[2].x, t.positions[2].y, t.positions[2].z), vec3(t.positions[0].x, t.positions[0].y, t.positions[0].z));
 
-    Vec2 delta_uv1 = vec2_sub(t.tex_coords_b, t.tex_coords_a);
-    Vec2 delta_uv2 = vec2_sub(t.tex_coords_c, t.tex_coords_a);
+    Vec2 delta_uv1 = vec2_sub(t.tex_coords[1], t.tex_coords[0]);
+    Vec2 delta_uv2 = vec2_sub(t.tex_coords[2], t.tex_coords[0]);
 
     f32 d = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
     if (abs_f32(d) < 0.0001f) {
@@ -178,12 +178,12 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
     triangles->aos[triangles->len + i] = (Triangle_AOS) {
       .shader       = t.shader,
       .normal       = vec3_normalize(vec3_cross(edge1, edge2)),
-      .normal_a     = t.normal_a,
-      .normal_b     = t.normal_b,
-      .normal_c     = t.normal_c,
-      .tex_coords_a = t.tex_coords_a,
-      .tex_coords_b = t.tex_coords_b,
-      .tex_coords_c = t.tex_coords_c,
+      .normal_a     = t.normals[0],
+      .normal_b     = t.normals[1],
+      .normal_c     = t.normals[2],
+      .tex_coords_a = t.tex_coords[0],
+      .tex_coords_b = t.tex_coords[1],
+      .tex_coords_c = t.tex_coords[2],
       .tangent      = tangent,
       .bitangent    = bitangent,
     };
@@ -213,14 +213,14 @@ internal void aabb_union(AABB *a, AABB *b, AABB *c) {
 
 internal void aabb_triangle(Triangle *triangle, AABB *aabb) {
   aabb->min = vec3(
-    min(triangle->a.x, min(triangle->b.x, triangle->c.x)) - EPSILON,
-    min(triangle->a.y, min(triangle->b.y, triangle->c.y)) - EPSILON,
-    min(triangle->a.z, min(triangle->b.z, triangle->c.z)) - EPSILON,
+    min(triangle->positions[0].x, min(triangle->positions[1].x, triangle->positions[2].x)) - EPSILON,
+    min(triangle->positions[0].y, min(triangle->positions[1].y, triangle->positions[2].y)) - EPSILON,
+    min(triangle->positions[0].z, min(triangle->positions[1].z, triangle->positions[2].z)) - EPSILON,
   );
   aabb->max = vec3(
-    max(triangle->a.x, max(triangle->b.x, triangle->c.x)) + EPSILON,
-    max(triangle->a.y, max(triangle->b.y, triangle->c.y)) + EPSILON,
-    max(triangle->a.z, max(triangle->b.z, triangle->c.z)) + EPSILON,
+    max(triangle->positions[0].x, max(triangle->positions[1].x, triangle->positions[2].x)) + EPSILON,
+    max(triangle->positions[0].y, max(triangle->positions[1].y, triangle->positions[2].y)) + EPSILON,
+    max(triangle->positions[0].z, max(triangle->positions[1].z, triangle->positions[2].z)) + EPSILON,
   );
 }
 
@@ -295,12 +295,6 @@ internal isize bvh_partition_triangles(isize n_triangles, isize per_child) {
 internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
   isize n_leaves = bvh_n_leaf_nodes(depth);
 
-  // fmt_printflnc("triangles: %d", triangles.len);
-  // fmt_printflnc("depth:     %d", depth);
-  // fmt_printflnc("internal:  %d", n_internal);
-  // fmt_printflnc("leaves:    %d", n_leaves);
-  // process_exit(0);
-
   isize per_child = n_leaves;
 
   if (triangles.len <= SIMD_WIDTH) {
@@ -321,12 +315,9 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
   while (n_slices != 0) {
     n_slices -= 1;
     Triangle_Slice slice = slices[n_slices];
-    if (slice.len <= per_child) {
-      panic("");
-    }
+    assert(slice.len > per_child);
 
     isize split = bvh_partition_triangles(slice.len, per_child);
-    // fmt_printflnc("n: %d, split: %d, per_child: %d", slice.len, split, per_child);
 
     Triangle_Slice left, right;
     left  = slice_end(slice,   split);
@@ -378,14 +369,6 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
   BVH_Node node = {0};
   isize index = scene->bvh.nodes.len;
   vector_append(&scene->bvh.nodes, node);
-
-  // slice_iter_v(slice_array(Slice(Triangle_Slice), finished), tris, i, {
-  //   if (i) {
-  //     fmt_printc(", ");
-  //   }
-  //   fmt_printfc("%d", tris.len);
-  // });
-  // fmt_printlnc("");
 
   slice_iter_v(slice_array(Slice(Triangle_Slice), finished), tris, i, {
     if (i >= n_finished) {

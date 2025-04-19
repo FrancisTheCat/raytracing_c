@@ -115,6 +115,32 @@ internal b8 gltf_parse_scenes(Gltf_File *gltf, Json_Parser *parser, Allocator al
   return status == Json_Status_End;
 }
 
+internal b8 gltf_parse_string_slice(
+  Gltf_File    *gltf,
+  Json_Parser  *parser,
+  String_Slice *s,
+  Allocator     allocator
+) {
+  if (parser->value.kind != Json_Value_Array) {
+    return false;
+  }
+
+  isize n = json_n_array_elems(parser);
+  slice_init(s, n, allocator);
+  isize i = 0;
+
+  Json_Status status;
+  JSON_PARSE_BLOCK(status, parser) {
+    if (parser->value.kind != Json_Value_String) {
+      return false;
+    }
+
+    IDX(*s, i) = parser->value.string;
+  }
+
+  return true;
+}
+
 internal b8 gltf_parse_float_slice(Json_Parser *parser, f32 *data, isize count) {
   if (parser->value.kind != Json_Value_Array) {
     return false;
@@ -226,7 +252,24 @@ internal b8 gltf_parse_nodes(Gltf_File *gltf, Json_Parser *parser, Allocator all
   return status == Json_Status_End;
 }
 
-internal b8 gltf_parse_pbr(Gltf_PBR_Material *pbr, Json_Parser *parser, Allocator allocator) {
+internal b8 gltf_parse_texture(Gltf_Texture_Info *texture, Json_Parser *parser) {
+  if (parser->value.kind != Json_Value_Object) {
+    return false;
+  }
+  Json_Status status;
+  JSON_PARSE_BLOCK(status, parser) {
+    STRING_SWITCH(parser->name)
+    JSON_MATCH("index",    texture->index,     integer);
+    JSON_MATCH("texCoord", texture->tex_coord, integer);
+    STRING_DEFAULT()
+      json_parser_skip(parser);
+    STRING_SWITCH_END()
+  }
+
+  return true;
+}
+
+internal b8 gltf_parse_pbr(Gltf_Material *mat, Json_Parser *parser, Allocator allocator) {
   if (parser->value.kind != Json_Value_Object) {
     return false;
   }
@@ -234,8 +277,8 @@ internal b8 gltf_parse_pbr(Gltf_PBR_Material *pbr, Json_Parser *parser, Allocato
   Json_Status status;
   JSON_PARSE_BLOCK(status, parser) {
     STRING_SWITCH(parser->name)
-    JSON_MATCH("metallicFactor",  pbr->metallic_factor,  number);
-    JSON_MATCH("roughnessFactor", pbr->roughness_factor, number);
+    JSON_MATCH("metallicFactor",  mat->metallic,  number);
+    JSON_MATCH("roughnessFactor", mat->roughness, number);
     STRING_CASE_C("baseColorFactor")
       if (parser->value.kind != Json_Value_Array) {
         return false;
@@ -245,35 +288,19 @@ internal b8 gltf_parse_pbr(Gltf_PBR_Material *pbr, Json_Parser *parser, Allocato
         if (parser->value.kind != Json_Value_Number || i > 4) {
           return false;
         }
-        pbr->base_color_factor.data[i] = parser->value.number;
+        mat->base_color.data[i] = parser->value.number;
                 
         i += 1;
       }
 
     STRING_CASE_C("baseColorTexture")
-      if (parser->value.kind != Json_Value_Object) {
+      if (!gltf_parse_texture(&mat->texture_base_color, parser)) {
         return false;
-      }
-      JSON_PARSE_BLOCK(status, parser) {
-        STRING_SWITCH(parser->name)
-        JSON_MATCH("index",    pbr->base_color_texture.index,     integer);
-        JSON_MATCH("texCoord", pbr->base_color_texture.tex_coord, integer);
-        STRING_DEFAULT()
-          json_parser_skip(parser);
-        STRING_SWITCH_END()
       }
       
     STRING_CASE_C("metallicRoughnessTexture")
-      if (parser->value.kind != Json_Value_Object) {
+      if (!gltf_parse_texture(&mat->texture_metallic_roughness, parser)) {
         return false;
-      }
-      JSON_PARSE_BLOCK(status, parser) {
-        STRING_SWITCH(parser->name)
-        JSON_MATCH("index",    pbr->metallic_roughness_texture.index,     integer);
-        JSON_MATCH("texCoord", pbr->metallic_roughness_texture.tex_coord, integer);
-        STRING_DEFAULT()
-          json_parser_skip(parser);
-        STRING_SWITCH_END()
       }
       
     STRING_DEFAULT()
@@ -298,15 +325,7 @@ internal b8 gltf_parse_materials(Gltf_File *gltf, Json_Parser *parser, Allocator
     if (parser->value.kind != Json_Value_Object) {
       return false;
     }
-    Gltf_Material material = {
-      .alpha_cutoff = 0.5f,
-      .alpha_mode   = LIT("OPAQUE"),
-      .pbr_metallic_roughness = {
-        .metallic_factor   = 1,
-        .roughness_factor  = 1,
-        .base_color_factor = vec4(1, 1, 1, 1),
-      },
-    };
+    Gltf_Material material = GLTF_MATERIAL_DEFAULT;
     JSON_PARSE_BLOCK(status, parser) {
       STRING_SWITCH(parser->name)
       JSON_MATCH("name",        material.name,         string);
@@ -322,22 +341,14 @@ internal b8 gltf_parse_materials(Gltf_File *gltf, Json_Parser *parser, Allocator
           if (parser->value.kind != Json_Value_Number || i > 3) {
             return false;
           }
-          material.emissive_factor.data[i] = parser->value.number;
+          material.emissive.data[i] = parser->value.number;
           
           i += 1;
         }
 
       STRING_CASE_C("emissiveTexture")
-        if (parser->value.kind != Json_Value_Object) {
+        if (!gltf_parse_texture(&material.texture_emissive, parser)) {
           return false;
-        }
-        JSON_PARSE_BLOCK(status, parser) {
-          STRING_SWITCH(parser->name)
-          JSON_MATCH("index",    material.emissive_texture.index,     integer);
-          JSON_MATCH("texCoord", material.emissive_texture.tex_coord, integer);
-          STRING_DEFAULT()
-            json_parser_skip(parser);
-          STRING_SWITCH_END()
         }
         
       STRING_CASE_C("normalTexture")
@@ -346,9 +357,9 @@ internal b8 gltf_parse_materials(Gltf_File *gltf, Json_Parser *parser, Allocator
         }
         JSON_PARSE_BLOCK(status, parser) {
           STRING_SWITCH(parser->name)
-          JSON_MATCH("index",    material.normal_texture.index,     integer);
-          JSON_MATCH("texCoord", material.normal_texture.tex_coord, integer);
-          JSON_MATCH("scale",    material.normal_texture_scale,     integer);
+          JSON_MATCH("index",    material.texture_normal.index,     integer);
+          JSON_MATCH("texCoord", material.texture_normal.tex_coord, integer);
+          JSON_MATCH("scale",    material.texture_normal_scale,     integer);
           STRING_DEFAULT()
             json_parser_skip(parser);
           STRING_SWITCH_END()
@@ -360,17 +371,117 @@ internal b8 gltf_parse_materials(Gltf_File *gltf, Json_Parser *parser, Allocator
         }
         JSON_PARSE_BLOCK(status, parser) {
           STRING_SWITCH(parser->name)
-          JSON_MATCH("index",    material.occlusion_texture.index,     integer);
-          JSON_MATCH("texCoord", material.occlusion_texture.tex_coord, integer);
-          JSON_MATCH("strength", material.occlusion_texture_strength,  integer);
+          JSON_MATCH("index",    material.texture_occlusion.index,     integer);
+          JSON_MATCH("texCoord", material.texture_occlusion.tex_coord, integer);
+          JSON_MATCH("strength", material.texture_occlusion_strength,  integer);
           STRING_DEFAULT()
             json_parser_skip(parser);
           STRING_SWITCH_END()
         }
         
       STRING_CASE_C("pbrMetallicRoughness")
-        if (!gltf_parse_pbr(&material.pbr_metallic_roughness, parser, allocator)) {
+        if (!gltf_parse_pbr(&material, parser, allocator)) {
           return false;
+        }
+        
+      STRING_CASE_C("extensions")
+        if (parser->value.kind != Json_Value_Object) {
+          return false;
+        }
+        JSON_PARSE_BLOCK(status, parser) {
+          if (parser->value.kind != Json_Value_Object) {
+            return false;
+          }
+          STRING_SWITCH(parser->name)
+          STRING_CASE_C("KHR_materials_sheen")
+            JSON_PARSE_BLOCK(status, parser) {
+              STRING_SWITCH(parser->name)
+              JSON_MATCH("sheenRoughnessFactor", material.sheen_roughness, number);
+              STRING_CASE_C("sheenColorFactor")
+                if (!gltf_parse_float_slice(parser, &material.sheen_color.data[0], 3)) {
+                  return false;
+                }
+              STRING_CASE_C("sheenColorTexture")
+                if (!gltf_parse_texture(&material.texture_sheen, parser)) {
+                  return false;
+                }
+              STRING_CASE_C("sheenRoughnessTexture")
+                if (!gltf_parse_texture(&material.texture_sheen_roughness, parser)) {
+                  return false;
+                }
+              STRING_DEFAULT()
+                json_parser_skip(parser);
+              STRING_SWITCH_END()
+            }
+          STRING_CASE_C("KHR_materials_anisotropy")
+            JSON_PARSE_BLOCK(status, parser) {
+              STRING_SWITCH(parser->name)
+              JSON_MATCH("anisotropyStrength", material.anisotropy_strength, number);
+              JSON_MATCH("anisotropyRotation", material.anisotropy_rotation, number);
+              STRING_CASE_C("anisotropyTexture")
+                if (!gltf_parse_texture(&material.texture_anisotropy, parser)) {
+                  return false;
+                }
+              STRING_DEFAULT()
+                json_parser_skip(parser);
+              STRING_SWITCH_END()
+            }
+          STRING_CASE_C("KHR_materials_clearcoat")
+            JSON_PARSE_BLOCK(status, parser) {
+              STRING_SWITCH(parser->name)
+              JSON_MATCH("clearcoatFactor",          material.clearcoat,           number);
+              JSON_MATCH("clearcoatRoughnessFactor", material.clearcoat_roughness, number);
+              STRING_CASE_C("clearcoatTexture")
+                if (!gltf_parse_texture(&material.texture_clearcoat, parser)) {
+                  return false;
+                }
+              STRING_CASE_C("clearcoatTextureRoughness")
+                if (!gltf_parse_texture(&material.texture_clearcoat_roughness, parser)) {
+                  return false;
+                }
+              STRING_DEFAULT()
+                json_parser_skip(parser);
+              STRING_SWITCH_END()
+            }
+          STRING_CASE_C("KHR_materials_emissive_strength")
+            JSON_PARSE_BLOCK(status, parser) {
+              STRING_SWITCH(parser->name)
+              JSON_MATCH("emissiveStrength", material.emissive_strength, number);
+              STRING_DEFAULT()
+                json_parser_skip(parser);
+              STRING_SWITCH_END()
+            }
+          STRING_CASE_C("KHR_materials_ior")
+            JSON_PARSE_BLOCK(status, parser) {
+              STRING_SWITCH(parser->name)
+              JSON_MATCH("number", material.ior, number);
+              STRING_DEFAULT()
+                json_parser_skip(parser);
+              STRING_SWITCH_END()
+            }
+          STRING_CASE_C("KHR_materials_specular")
+            JSON_PARSE_BLOCK(status, parser) {
+              STRING_SWITCH(parser->name)
+              JSON_MATCH("specularFactor", material.specular, number);
+              STRING_CASE_C("specularColorFactor")
+                if (!gltf_parse_float_slice(parser, &material.specular_color.data[0], 3)) {
+                  return false;
+                }
+              STRING_CASE_C("specularTexture")
+                if (!gltf_parse_texture(&material.texture_specular, parser)) {
+                  return false;
+                }
+              STRING_CASE_C("specularTextureRoughness")
+                if (!gltf_parse_texture(&material.texture_specular_roughness, parser)) {
+                  return false;
+                }
+              STRING_DEFAULT()
+                json_parser_skip(parser);
+              STRING_SWITCH_END()
+            }
+          STRING_DEFAULT()
+            json_parser_skip(parser);
+          STRING_SWITCH_END()
         }
         
       STRING_DEFAULT()
@@ -881,17 +992,19 @@ extern void gltf_file_destroy(Gltf_File *gltf, Allocator allocator) {
     slice_delete(mesh.weights,    allocator)
   });
 
-  slice_delete(gltf->scenes,       allocator);
-  slice_delete(gltf->nodes,        allocator);
-  slice_delete(gltf->materials,    allocator);
-  slice_delete(gltf->meshes,       allocator);
-  slice_delete(gltf->accessors,    allocator);
-  slice_delete(gltf->buffer_views, allocator);
-  slice_delete(gltf->buffers,      allocator);
-  slice_delete(gltf->samplers,     allocator);
-  slice_delete(gltf->cameras,      allocator);
-  slice_delete(gltf->textures,     allocator);
-  slice_delete(gltf->images,       allocator);
+  slice_delete(gltf->scenes,              allocator);
+  slice_delete(gltf->nodes,               allocator);
+  slice_delete(gltf->materials,           allocator);
+  slice_delete(gltf->meshes,              allocator);
+  slice_delete(gltf->accessors,           allocator);
+  slice_delete(gltf->buffer_views,        allocator);
+  slice_delete(gltf->buffers,             allocator);
+  slice_delete(gltf->samplers,            allocator);
+  slice_delete(gltf->cameras,             allocator);
+  slice_delete(gltf->textures,            allocator);
+  slice_delete(gltf->images,              allocator);
+  slice_delete(gltf->extensions_used,     allocator);
+  slice_delete(gltf->extensions_required, allocator);
 }
 
 extern b8 gltf_parse_file(String data, Gltf_File *gltf, Allocator allocator) {
@@ -907,11 +1020,11 @@ extern b8 gltf_parse_file(String data, Gltf_File *gltf, Allocator allocator) {
         goto fail;
       }
     STRING_CASE_C("extensionsRequired")
-      if (!gltf_parse_extensions_required(gltf, &parser)) {
+      if (!gltf_parse_string_slice(gltf, &parser, &gltf->extensions_required, allocator)) {
         return false;
       }
     STRING_CASE_C("extensionsUsed")
-      if (!gltf_parse_extensions_used(gltf, &parser)) {
+      if (!gltf_parse_string_slice(gltf, &parser, &gltf->extensions_used, allocator)) {
         return false;
       }
     STRING_CASE_C("scene")
@@ -1045,7 +1158,6 @@ extern b8 gltf_parse_glb(Byte_Slice data, String path, Gltf_File *file, Allocato
   if (cursor + chunk_header.length > data.len) {
     return false;
   }
-  cursor += size_of(chunk_header);
   file->glb_data = (Byte_Slice) {
     .data = data.data + cursor,
     .len  = chunk_header.length,
@@ -1186,7 +1298,6 @@ internal void node_to_triangles(
     Gltf_Mesh const *mesh = &IDX(file->meshes, node->mesh);
     for_range(primitive_i, 0, mesh->primitives.len) {
       Gltf_Primitive primitive = IDX(mesh->primitives, primitive_i);
-    // slice_iter_v(mesh->primitives, primitive, j, {
       Gltf_Accessor const *tex_coords = nil;
       Gltf_Accessor const *positions  = nil;
       Gltf_Accessor const *normals    = nil;

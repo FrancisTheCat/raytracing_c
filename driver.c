@@ -15,6 +15,19 @@
 
 #define CHUNK_SIZE 32
 
+#undef STRING_CASE
+
+#define STRING_CASE_C(s) STRING_CASE(LIT(s))
+#define STRING_CASE(s) \
+  } else if (string_equal(_string_switch_string, s)) {
+
+#define STRING_SWITCH(s) { String _string_switch_string = s;
+
+#undef  STRING_SWITCH
+#define STRING_SWITCH(s) { String _string_switch_string = (s); if (false) {
+#define STRING_DEFAULT() } else {
+#define STRING_SWITCH_END() }}
+
 internal Color3 sample_texture_nearest(Image const *texture, Vec2 tex_coords) {
   if (tex_coords.x < 0) {
     tex_coords.x += -(i32)tex_coords.x + 1;
@@ -91,7 +104,7 @@ internal Color3 sample_background(Image const *image, Vec3 dir) {
 }
 
 internal void load_texture(String path, Image *texture) {
-  b8 ok = png_load_bytes(
+  b8 ok = stb_image_load_bytes(
     unwrap_err(read_entire_file_path(path, context.allocator)),
     texture,
     context.allocator
@@ -138,9 +151,9 @@ internal inline Vec3 normal_map_apply(Image *normal_map, f32 normal_map_strength
 }
 
 internal inline void basis(Vec3 view, Vec3 normal, Vec3 *tangent, Vec3 *bitangent) {
-  if (abs_f32(vec3_dot(normal, view)) < 0.999f) {
+  if (abs_f32(vec3_dot(normal, view)) < 0.9999f) {
     *tangent = vec3_normalize(vec3_cross(normal, view));
-  } else if (abs_f32(vec3_dot(normal, vec3(0, 1, 0))) < 0.95f) {
+  } else if (abs_f32(vec3_dot(normal, vec3(0, 1, 0))) < 0.9999f) {
     *tangent = vec3_normalize(vec3_cross(normal, vec3(0, 1, 0)));
   } else {
     *tangent = vec3_normalize(vec3_cross(normal, vec3(1, 0, 0)));
@@ -175,7 +188,7 @@ enum {
 
 typedef struct {
   Vec3   base_color, emission;
-  f32    roughness, metalness, normal_map_strength, sheen, sheen_tint, anisotropic_aspect;
+  f32    roughness, metalness, normal_map_strength, sheen, sheen_tint, anisotropic_strength;
   Image *texture_albedo;
   Image *texture_normal;
   Image *texture_metal_roughness;
@@ -261,17 +274,17 @@ internal inline f32 shadowed_f90(Color3 f0) {
 }
 
 typedef struct {
-  f32    roughness, metalness, sheen, sheen_tint, anisotropic_aspect;
+  f32    roughness, metalness, sheen, sheen_tint, anisotropic_strength2;
   Color3 base_color;
 } Disney_BRDF_Data;
 
+f32 lerp_f32(f32 x, f32 y, f32 t) {
+  return x * (1 - t) + y * t;
+}
+
 Vec4 sample_disney_BRDF(Disney_BRDF_Data const *data, Vec3 in_dir, Vec3 *out_dir) {
-  f32  aspect       = data->anisotropic_aspect;
-  if (aspect == 0) {
-    aspect = 1;
-  }
-  f32  alpha_x      = (data->roughness * data->roughness) / aspect;
-  f32  alpha_y      = (data->roughness * data->roughness) * aspect;
+  f32  alpha_x      = lerp_f32(data->roughness * data->roughness, 1, data->anisotropic_strength2);
+  f32  alpha_y      = data->roughness * data->roughness;
   Vec3 micro_normal = sample_GGX_VNDF(in_dir, alpha_x, alpha_y);
 
   Color3 f0      = vec3_lerp(vec3_broadcast(0.04f), data->base_color, data->metalness);
@@ -369,12 +382,12 @@ internal void disney_shader_proc(rawptr _data, Shader_Input const *input, Shader
   Matrix_3x3 world_to_tangent = matrix_3x3_transpose(tangent_to_world);
 
   Disney_BRDF_Data brdf_data = {
-    .roughness          = roughness,
-    .metalness          = metalness,
-    .base_color         = base_color,
-    .sheen              = data->sheen,
-    .sheen_tint         = data->sheen_tint,
-    .anisotropic_aspect = data->anisotropic_aspect,
+    .roughness             = roughness,
+    .metalness             = metalness,
+    .base_color            = base_color,
+    .sheen                 = data->sheen,
+    .sheen_tint            = data->sheen_tint,
+    .anisotropic_strength2 = data->anisotropic_strength * data->anisotropic_strength,
   };
   
   Vec3 in_dir = matrix_3x3_mul_vec3(world_to_tangent, vec3_scale(input->direction, -1));
@@ -403,150 +416,158 @@ internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_
 }
 
 void print_usage() {
-  fmt_eprintflnc("%S -W <width> -H <height> -S <samples> -T <threads> -B <max_bounces> <model.obj>", IDX(os_args, 0));
+  fmt_eprintflnc("%S -W <width> -H <height> -S <samples> -T <threads> -B <max_bounces> <model.(obj|glb|gltf)>", IDX(os_args, 0));
 }
 
-i32 main() {
-  String model = {0};
+typedef struct {
+  String model;
+  isize  width, height, samples, max_bounces, n_threads;
+  b8     verbose;
+} Config;
 
-  isize width       = 1024;
-  isize height      = 1024;
-  isize samples     = 16;
-  isize max_bounces = 8;
-  isize n_threads   = 1;
-
+internal b8 parse_command_line_args(Config *config) {
   for (isize i = 1; i < os_args.len; ) {
     String arg = IDX(os_args, i);
     if (IDX(arg, 0) == '-') {
-      if (arg.len != 2 || i == os_args.len - 1) {
+      if (arg.len != 2) {
         print_usage();
-        return 1;
+        return false;
+      }
+      if (IDX(arg, 1) == 'V') {
+        config->verbose = true;
+        i += 1;
+        continue;
+      }
+      if (i == os_args.len - 1) {
+        print_usage();
+        return false;
       }
 
       String arg2   = IDX(os_args, i + 1);
       isize  number = parse_int(&arg2);
       switch (IDX(arg, 1)) {
       CASE 'W':
-        width = number;
+        config->width = number;
       CASE 'H':
-        height = number;
+        config->height = number;
       CASE 'S':
-        samples = number;
+        config->samples = number;
       CASE 'T':
-        n_threads = number;
+        config->n_threads = number;
       CASE 'B':
-        max_bounces = number;
+        config->max_bounces = number;
       DEFAULT:
         print_usage();
-        return 1;
+        return false;
       }
 
       i += 2;
     } else {
-      if (model.len) {
+      if (config->model.len) {
         print_usage();
-        return 1;
+        return false;
       } else {
-        model = arg;
+        config->model = arg;
       }
       i += 1;
     }
   }
 
-  if (model.len == 0) {
+  if (config->model.len == 0) {
     print_usage();
+    return false;
+  }
+
+  return true;
+}
+
+internal b8 load_model_obj(String path, Byte_Slice data, Triangle_Slice *triangles, Camera *camera) {
+  Obj_File obj = {0};
+  b8 ok = obj_load(bytes_to_string(data), &obj, true, context.allocator);
+  if (!ok) {
+    fmt_eprintlnc("Failed to load model file");
     return 1;
   }
 
-  context.logger = (Logger) {0};
+  Hash_Map(String, Image) obj_images;
+  hash_map_init(&obj_images, 64, string_equal, string_hash, context.allocator);
 
-  Image image = {
-    .components = 3,
-    .pixel_type = PT_u8,
-    .width      = width,
-    .stride     = width,
-    .height     = height,
-  };
-  image.pixels = slice_make_aligned(Byte_Slice, width * height * 3, 64, context.allocator);
+  #define obj_load_texture(path) {                       \
+    if (path.len && !hash_map_get(obj_images, (path))) { \
+      Image image;                                       \
+      load_texture((path), &image);                      \
+      hash_map_insert(&obj_images, (path), image);       \
+    }                                                    \
+  }
 
-  Image texture_albedo          = {0};
-  Image texture_metal_roughness = {0};
-  Image texture_emission        = {0};
-  Image texture_normal          = {0};
-
-  Scene scene = {0};
-
-  Image texture_background = {0};
-  load_texture(LIT("background.png"), &texture_background);
-  scene.background = (Background) {
-    .data = &texture_background,
-    .proc = (Background_Proc)sample_background,
-  };
-
-  load_texture(LIT("helmet_albedo.png"),   &texture_albedo);
-  load_texture(LIT("helmet_normal.png"),   &texture_normal);
-  load_texture(LIT("helmet_emission.png"), &texture_emission);
-  load_texture(LIT("helmet_mr.png"),       &texture_metal_roughness);
-
-  // f32 angle    = PI / 6.0f;
-  // f32 distance = 2;
-
-  scene.camera.view_matrix = matrix_4x4_translation_rotation_scale(vec3(0, 0, 3), vec4(0, 0, 0, 1), vec3(1, 1, 1));
-  // scene.camera.position     = vec3(sin_f32(angle) * distance, -0.2f, cos_f32(angle) * distance);
-  // scene.camera.matrix       = matrix_3x3_rotate(vec3(0, 1, 0), angle);
-  scene.camera.fov          = (70.0f / 360.0f) * PI * 2.0;
-  scene.camera.focal_length = 1.0f / tan_f32(scene.camera.fov * 0.5f);
-
-  Byte_Slice data = unwrap_err(read_entire_file_path(model, context.allocator));
-  Obj_File   obj  = {0};
-  obj_load(bytes_to_string(data), &obj, false, context.allocator);
-
-  Triangle_Slice triangles;
-  slice_init(&triangles, obj.triangles.len, context.allocator);
-
-  isize n_triangles = obj.triangles.len;
-
-  Shader shader = {
-    .data = &(PBR_Shader_Data) {
-      .base_color              = vec3(1, 1, 1),
-      .emission                = vec3(1, 1, 1),
-      .roughness               = 1,
-      .metalness               = 1,
-      .normal_map_strength     = 0.5f,
-      .anisotropic_aspect      = 1, // sqrt_f32(1 - 0.9f * anisotropic)
-      .texture_albedo          = &texture_albedo,
-      .texture_metal_roughness = &texture_metal_roughness,
-      .texture_emission        = &texture_emission,
-      .texture_normal          = &texture_normal,
-    },
-    .proc = disney_shader_proc,
-  };
-
-  slice_iter_v(obj.triangles, t, i, {
-    IDX(triangles, i) = (Triangle) {
-      .a            = t.a.position,
-      .b            = t.b.position,
-      .c            = t.c.position,
-      .normal_a     = t.a.normal,
-      .normal_b     = t.b.normal,
-      .normal_c     = t.c.normal,
-      .tex_coords_a = t.a.tex_coords,
-      .tex_coords_b = t.b.tex_coords,
-      .tex_coords_c = t.c.tex_coords,
-      .shader       = shader,
-    };
+  slice_iter_v(obj.materials, material, i, {
+    obj_load_texture(material.texture_diffuse.path);
+    obj_load_texture(material.texture_emissive.path);
+    if (material.is_pbr) {
+      obj_load_texture(material.pbr.texture_roughness.path);
+      obj_load_texture(material.pbr.texture_metallic.path);
+      obj_load_texture(material.pbr.texture_normal.path);
+      obj_load_texture(material.pbr.texture_sheen.path);
+    } else {
+      obj_load_texture(material.simple.texture_specular_color.path);
+      obj_load_texture(material.simple.texture_specular.path);
+      obj_load_texture(material.simple.texture_ambient.path);
+      obj_load_texture(material.simple.texture_alpha.path);
+      obj_load_texture(material.simple.texture_bump.path);
+    }
   });
 
-  String gltf_path = LIT("sheen.glb");
-  Byte_Slice glb_data = unwrap_err_msg(read_entire_file_path(gltf_path, context.allocator), "Failed to open gltf file");
+  Vector(PBR_Shader_Data) obj_shader_data;
+  vector_init(&obj_shader_data, 0, 8, context.allocator);
 
+  slice_iter_v(obj.materials, material, i, {
+    PBR_Shader_Data d = {
+      .base_color       = material.diffuse,
+      .emission         = material.emissive,
+      .roughness        = 0.5f,
+      .texture_albedo   = hash_map_get(obj_images, material.texture_diffuse.path),
+      .texture_emission = hash_map_get(obj_images, material.texture_emissive.path),
+    };
+    if (material.is_pbr) {
+      d.anisotropic_strength    = material.pbr.anisotropic;
+      d.metalness               = material.pbr.metallic;
+      d.roughness               = material.pbr.roughness;
+      d.sheen                   = material.pbr.sheen;
+      d.texture_normal          = hash_map_get(obj_images, material.pbr.texture_normal.path);
+      d.texture_metal_roughness = hash_map_get(obj_images, material.pbr.texture_metallic.path);
+    } else {
+      fmt_eprintflnc("material %d is not a pbr material", i);
+    }
+    vector_append(&obj_shader_data, d)
+  });
+
+  slice_init(triangles, obj.triangles.len, context.allocator);
+
+  slice_iter_v(obj.triangles, t, i, {
+    Triangle triangle = {
+      .shader = {
+        .data = &IDX(obj_shader_data, t.material),
+        .proc = disney_shader_proc,
+      },
+    };
+    for_range(j, 0, 3) {
+      triangle.tex_coords[j] = t.vertices[j].tex_coords;
+      triangle.positions[j]  = t.vertices[j].position;
+      triangle.normals[j]    = t.vertices[j].normal;
+    }
+    IDX(*triangles, i) = triangle;
+  });
+  return true;
+}
+
+internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triangles, Camera *camera) {
   Growing_Arena_Allocator gltf_arena;
   Allocator gltf_allocator = growing_arena_allocator_init(&gltf_arena, 1 << 16, context.allocator);
 
   Gltf_File gltf;
-  b8 gltf_parse_ok = gltf_parse(glb_data, gltf_path, &gltf, gltf_allocator);
+  b8 gltf_parse_ok = gltf_parse(data, path, &gltf, gltf_allocator);
   assert(gltf_parse_ok);
-  b8 gltf_load_buffers_ok = gltf_load_buffers(gltf_path, &gltf, gltf_allocator);
+  b8 gltf_load_buffers_ok = gltf_load_buffers(path, &gltf, gltf_allocator);
   assert(gltf_load_buffers_ok);
 
   slice_iter_v(gltf.nodes, node, i, {
@@ -555,7 +576,7 @@ i32 main() {
       if (cam.is_orthographic) {
         continue;
       }
-      scene.camera = (Camera) {
+      *camera = (Camera) {
         .fov          = cam.perspective.y_fov,
         .focal_length = 1.0f / tan_f32(cam.perspective.y_fov * 0.5f),
         .view_matrix  = node.matrix,
@@ -574,33 +595,45 @@ i32 main() {
   slice_init(&gltf_images, gltf.images.len, gltf_allocator);
 
   slice_iter_v(gltf.images, image, i, {
-    fmt_printflnc("type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, image.data.len);
+    b8 ok = stb_image_load_bytes(image.data, &IDX(gltf_images, i), gltf_allocator);
+    if (!ok) {
+      fmt_eprintflnc("Failed to load image: type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, image.data.len);
+    }
   });
 
   slice_iter_v(gltf.materials, material, i, {
     PBR_Shader_Data data = {
       .base_color = vec3(
-        material.pbr_metallic_roughness.base_color_factor.r,
-        material.pbr_metallic_roughness.base_color_factor.g,
-        material.pbr_metallic_roughness.base_color_factor.b,
+        material.base_color.r,
+        material.base_color.g,
+        material.base_color.b,
       ),
-      .roughness          = material.pbr_metallic_roughness.roughness_factor,
-      .metalness          = material.pbr_metallic_roughness.metallic_factor,
-      // .emission           = material.emissive_factor,
-      .anisotropic_aspect = 1,
+      .roughness          = material.roughness,
+      .metalness          = material.metallic,
+      .sheen              = luminance(material.sheen_color),
+      .emission           = material.emissive,
     };
-    if (material.normal_texture.index != -1) {
-      Gltf_Texture *texture = &IDX(gltf.textures, material.normal_texture.index);
-      Gltf_Image   *image   = &IDX(gltf.images,   texture->source);
-      Gltf_Sampler *sampler = &IDX(gltf.samplers, texture->sampler);
+    if (material.texture_normal.index != -1) {
+      Gltf_Texture *texture    = &IDX(gltf.textures, material.texture_normal.index);
+      data.texture_normal      = &IDX(gltf_images, texture->source);
+      data.normal_map_strength = material.texture_normal_scale;
+
+      // TODO: Gltf_Sampler *sampler = &IDX(gltf.samplers, texture->sampler);
     }
-    if (material.emissive_texture.index != -1) {
+    if (material.texture_emissive.index != -1) {
+      Gltf_Texture *texture = &IDX(gltf.textures, material.texture_emissive.index);
+      data.texture_emission = &IDX(gltf_images, texture->source);
     }
-    if (material.occlusion_texture.index != -1) {
+    if (material.texture_occlusion.index != -1) {
+      // TODO
     }
-    if (material.pbr_metallic_roughness.base_color_texture.index != -1) {
+    if (material.texture_base_color.index != -1) {
+      Gltf_Texture *texture = &IDX(gltf.textures, material.texture_base_color.index);
+      data.texture_albedo   = &IDX(gltf_images, texture->source);
     }
-    if (material.pbr_metallic_roughness.metallic_roughness_texture.index != -1) {
+    if (material.texture_metallic_roughness.index != -1) {
+      Gltf_Texture *texture        = &IDX(gltf.textures, material.texture_metallic_roughness.index);
+      data.texture_metal_roughness = &IDX(gltf_images, texture->source);
     }
     IDX(gltf_shader_data, i) = data;
     IDX(gltf_shaders, i) = (Shader) {
@@ -612,53 +645,140 @@ i32 main() {
   Gltf_Triangle_Vector gltf_triangles;
   vector_init(&gltf_triangles, 0, 8, context.allocator);
   gltf_to_triangles(&gltf, &gltf_triangles);
-  slice_init(&triangles, gltf_triangles.len, context.allocator);
-  n_triangles = gltf_triangles.len;
+
+  slice_init(triangles, gltf_triangles.len, context.allocator);
 
   slice_iter_v(gltf_triangles, t, i, {
-    IDX(triangles, i) = (Triangle) {
-      .a            = t.vertices[0].position,
-      .b            = t.vertices[1].position,
-      .c            = t.vertices[2].position,
-      .normal_a     = t.vertices[0].normal,
-      .normal_b     = t.vertices[1].normal,
-      .normal_c     = t.vertices[2].normal,
-      .tex_coords_a = t.vertices[0].tex_coords,
-      .tex_coords_b = t.vertices[1].tex_coords,
-      .tex_coords_c = t.vertices[2].tex_coords,
-      // .shader       = (Shader) {
-      //   .data = &IDX(gltf_shader_data, t.material),
-      //   .proc = disney_shader_proc,
-      // },
-      .shader = shader,
+    Triangle triangle = {
+      .shader = (Shader) {
+        .data = &IDX(gltf_shader_data, t.material),
+        .proc = disney_shader_proc,
+      },
     };
+    for_range(j, 0, 3) {
+      triangle.tex_coords[j] = t.vertices[j].tex_coords;
+      triangle.positions[j]  = t.vertices[j].position;
+      triangle.normals[j]    = t.vertices[j].normal;
+    }
+    IDX(*triangles, i) = triangle;
   });
+  return true;
+}
+
+internal b8 load_model_file(String path, Triangle_Slice *triangles, Camera *camera) {
+  isize extension_offset = -1;
+  for (isize i = path.len - 1; i >= 0; i -= 1) {
+    if (IDX(path, i) == '.') {
+      extension_offset = i;
+      break;
+    }
+  }
+  if (extension_offset == -1) {
+    fmt_eprintflnc("Unrecognized file type: '%S'", path);
+    print_usage();
+    return 1;
+  }
+  String extension = slice_start(path, extension_offset);
+
+  b8 is_obj = false;
+
+  STRING_SWITCH(extension)
+  STRING_CASE_C(".obj")
+    is_obj = true;
+  STRING_CASE_C(".glb")
+    is_obj = false;
+  STRING_CASE_C(".gltf")
+    is_obj = false;
+  STRING_DEFAULT()
+    fmt_eprintflnc("Unrecognized file type: '%S'", path);
+    print_usage();
+    return 1;
+  STRING_SWITCH_END()
+
+  Byte_Slice data = or_do_err(read_entire_file_path(path, context.allocator), _err, {
+    fmt_eprintlnc("Failed to read model file");
+    return false;
+  });
+
+  b8 ok;
+  if (is_obj) {
+    ok = load_model_obj(path, data, triangles, camera);
+  } else {
+    ok = load_model_gltf(path, data, triangles, camera);
+  }
+
+  return ok;
+}
+
+i32 main() {
+  context.logger = (Logger) {0};
+
+  Config config = {
+    .width       = 1024,
+    .height      = 1024,
+    .samples     = 16,
+    .max_bounces = 8,
+    .n_threads   = 1,
+    .verbose     = false,
+  };
+  if (!parse_command_line_args(&config)) {
+    return 1;
+  }
+
+  Image image = {
+    .components = 3,
+    .pixel_type = PT_u8,
+    .width      = config.width,
+    .stride     = config.width,
+    .height     = config.height,
+  };
+  image.pixels = slice_make_aligned(Byte_Slice, config.width * config.height * 3, 64, context.allocator);
+
+  Scene scene = {0};
+
+  Image texture_background = {0};
+  load_texture(LIT("background.png"), &texture_background);
+  scene.background = (Background) {
+    .data = &texture_background,
+    .proc = (Background_Proc)sample_background,
+  };
+
+  scene.camera.view_matrix = matrix_4x4_translation_rotation_scale(vec3(0, 0, 3), vec4(0, 0, 0, 1), vec3(1, 1, 1));
+  scene.camera.fov          = (70.0f / 360.0f) * PI * 2.0;
+  scene.camera.focal_length = 1.0f / tan_f32(scene.camera.fov * 0.5f);
+
+  Triangle_Slice triangles;
+  if (!load_model_file(config.model, &triangles, &scene.camera)) {
+    return 1;
+  }
 
   Timestamp bvh_start_time = time_now();
   scene_init(&scene, triangles, context.allocator);
-  fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
+  if (config.verbose) {
+    fmt_printflnc("Bvh generated in %dms", time_since(bvh_start_time) / Millisecond);
 
-  fmt_printflnc("Width:     %d", width);
-  fmt_printflnc("Height:    %d", height);
-  fmt_printflnc("Samples:   %d", samples);
-  fmt_printflnc("Bounces:   %d", max_bounces);
-  fmt_printflnc("Threads:   %d", n_threads);
-  fmt_printflnc("BVH-Nodes: %d", scene.bvh.nodes.len);
-  fmt_printflnc("Triangles: %d", n_triangles);
+    fmt_printflnc("Width:     %d", config.width);
+    fmt_printflnc("Height:    %d", config.height);
+    fmt_printflnc("Samples:   %d", config.samples);
+    fmt_printflnc("Bounces:   %d", config.max_bounces);
+    fmt_printflnc("Threads:   %d", config.n_threads);
+    fmt_printflnc("BVH-Nodes: %d", scene.bvh.nodes.len);
+    fmt_printflnc("Triangles: %d", triangles.len);
 
-  fmt_printlnc("");
+    fmt_printlnc("");
+  }
 
   Timestamp start_time = time_now();
 
   Rendering_Context rendering_context = {
     .image       = image,
     .scene       = &scene,
-    .max_bounces = max_bounces,
-    .n_threads   = n_threads,
-    .samples     = samples,
+    .max_bounces = config.max_bounces,
+    .n_threads   = config.n_threads,
+    .samples     = config.samples,
   };
 
-  for_range(i, 0, n_threads) {
+  for_range(i, 0, config.n_threads) {
     thread_create((Thread_Proc)render_thread_proc, &rendering_context, THREAD_STACK_DEFAULT, THREAD_TLS_DEFAULT);
   }
 
@@ -680,7 +800,9 @@ i32 main() {
 
   Duration time = time_since(start_time);
   fmt_printflnc("%dms", (isize)(time / Millisecond));
-  fmt_printflnc("%d samples/second", (isize)((u64)width * height * samples / (f64)((f64)time / Second)));
+  if (config.verbose) {
+    fmt_printflnc("%d samples/second", (isize)((u64)config.width * config.height * config.samples / (f64)((f64)time / Second)));
+  }
 
   Fd     output_file   = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));
   Writer output_writer = writer_from_handle(output_file);
