@@ -598,6 +598,7 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
     b8 ok = stb_image_load_bytes(image.data, &IDX(gltf_images, i), gltf_allocator);
     if (!ok) {
       fmt_eprintflnc("Failed to load image: type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, image.data.len);
+      return false;
     }
   });
 
@@ -608,10 +609,10 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
         material.base_color.g,
         material.base_color.b,
       ),
-      .roughness          = material.roughness,
-      .metalness          = material.metallic,
-      .sheen              = luminance(material.sheen_color),
-      .emission           = material.emissive,
+      .roughness = material.roughness,
+      .metalness = material.metallic,
+      .sheen     = luminance(material.sheen_color),
+      .emission  = material.emissive,
     };
     if (material.texture_normal.index != -1) {
       Gltf_Texture *texture    = &IDX(gltf.textures, material.texture_normal.index);
@@ -623,9 +624,6 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
     if (material.texture_emissive.index != -1) {
       Gltf_Texture *texture = &IDX(gltf.textures, material.texture_emissive.index);
       data.texture_emission = &IDX(gltf_images, texture->source);
-    }
-    if (material.texture_occlusion.index != -1) {
-      // TODO
     }
     if (material.texture_base_color.index != -1) {
       Gltf_Texture *texture = &IDX(gltf.textures, material.texture_base_color.index);
