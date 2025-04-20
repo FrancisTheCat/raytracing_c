@@ -15,51 +15,46 @@
 #undef Shader
 #undef Camera
 
-#include "scene.h"
+#define SIMD_WIDTH 8
 
-internal Color colors[] = {
-  RAYWHITE,
-  YELLOW,
-  GREEN,
-  BLUE,
-  PURPLE,
-  RED,
-  ORANGE,
-};
+#include "scene.c"
 
-internal void draw_bvh_node(BVH *bvh, BVH_Node *node, i32 depth) {
+internal void draw_bvh_node(BVH *bvh, BVH_Node *node, isize depth, isize show) {
   if (depth < 0) {
     return;
   }
-  Color color = ColorAlpha(colors[depth % count_of(colors)], 0.25f);
-  for_range(i, 0, 8) {
-    Vector3 position;
-    float width, height, depth;
+  Color color = ColorAlpha(ColorFromHSV(-360 * (f32)depth / bvh->depth, 0.7, 1), 0.125f);
+  if (depth == show) {
+    for_range(i, 0, 8) {
+      Vector3 position = {
+        .x = (node->maxs.x[i] + node->mins.x[i]) / 2.0f,
+        .y = (node->maxs.y[i] + node->mins.y[i]) / 2.0f,
+        .z = (node->maxs.z[i] + node->mins.z[i]) / 2.0f,
+      };
 
-    position.x = (node->maxs.x[i] + node->mins.x[i]) / 2.0f;
-    position.y = (node->maxs.y[i] + node->mins.y[i]) / 2.0f;
-    position.z = (node->maxs.z[i] + node->mins.z[i]) / 2.0f;
+      f32 x = node->maxs.x[i] - node->mins.x[i];
+      f32 y = node->maxs.y[i] - node->mins.y[i];
+      f32 z = node->maxs.z[i] - node->mins.z[i];
 
-    width  = node->maxs.x[i] - node->mins.x[i];
-    height = node->maxs.y[i] - node->mins.y[i];
-    depth  = node->maxs.z[i] - node->mins.z[i];
-
-    DrawCubeWires(position, width, height, depth, color);
+      DrawCubeWires(position, x, y, z, color);
+    }
   }
 
   for_range(i, 0, 8) {
-    if (!node->children[i].leaf) {
-      draw_bvh_node(bvh, &IDX(bvh->nodes, node->children[i].index), depth - 1);
+    if (
+      node->mins.x[i] >= node->maxs.x[i] || 
+      node->mins.y[i] >= node->maxs.y[i] || 
+      node->mins.z[i] >= node->maxs.z[i]
+    ) {
+      continue;
     }
+    BVH_Node *child = node + 1 + i * bvh_n_internal_nodes(depth - 1);
+    draw_bvh_node(bvh, child, depth - 1, show);
   }
 }
 
-internal void draw_bvh(BVH bvh) {
-  if (bvh.root.leaf) {
-    return;
-  }
-  BVH_Node node = IDX(bvh.nodes, bvh.root.index);
-  draw_bvh_node(&bvh, &node, 10);
+internal void draw_bvh(BVH bvh, isize depth) {
+  draw_bvh_node(&bvh, &IDX(bvh.nodes, 0), bvh.depth, depth);
 }
 
 i32 main() {
@@ -87,15 +82,23 @@ i32 main() {
   DisableCursor();
 
   SetTargetFPS(60);
+
+  isize depth = scene.bvh.depth;
   
   while (!WindowShouldClose()) {
     UpdateCamera(&camera, CAMERA_THIRD_PERSON);
+
+    if (IsKeyPressed(KEY_UP)) {
+      depth += 1;
+    } else if (IsKeyPressed(KEY_DOWN)) {
+      depth -= 1;
+    }
 
     BeginDrawing();
       ClearBackground(BLACK);
 
       BeginMode3D(camera);
-        draw_bvh(scene.bvh);
+        draw_bvh(scene.bvh, depth);
       EndMode3D();
     EndDrawing();
   }

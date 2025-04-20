@@ -9,9 +9,8 @@
 #include "scene.h"
 
 typedef struct __attribute__((aligned(32))) {
-  i32       version, n_nodes, n_triangles;
-  i32 root;
-  u8        _padding[16];
+  i32    version, n_nodes, n_triangles, bvh_depth;
+  Camera camera;
 } Scene_File_Header;
 
 extern void scene_save_writer(Writer const *w, Scene const *scene) {
@@ -19,6 +18,8 @@ extern void scene_save_writer(Writer const *w, Scene const *scene) {
     .version     = 0,
     .n_nodes     = scene->bvh.nodes.len,
     .n_triangles = scene->triangles.cap,
+    .bvh_depth   = scene->bvh.depth,
+    .camera      = scene->camera,
   };
   write_any(w, &header);
   Byte_Slice node_data = slice_to_bytes(scene->bvh.nodes);
@@ -43,6 +44,8 @@ extern b8 scene_load_bytes(Byte_Slice data, Scene *scene) {
     return false;
   }
 
+  scene->camera         = header.camera;
+  scene->bvh.depth      = header.bvh_depth;
   scene->bvh.nodes.len  = header.n_nodes;
   scene->bvh.nodes.cap  = header.n_nodes;
   scene->bvh.nodes.data = (BVH_Node *)(data.data + size_of(header));
