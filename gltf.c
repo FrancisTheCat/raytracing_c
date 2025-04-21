@@ -5,6 +5,7 @@
 #include "codin/os.h"
 #include "codin/fmt.h"
 #include "codin/strings.h"
+#include "codin/path.h"
 
 #include "uri.h"
 
@@ -1240,6 +1241,11 @@ internal b8 load_uri_data(String path, String uri, Byte_Slice *data, Allocator a
     file_path = uri_file.path;
   CASE Uri_Scheme_Unknown:
     file_path = uri;
+  }
+
+  String dir = path_get_dir(path);
+  if (dir.len) {
+    file_path = fmt_tprintfc("%S/%S", dir, file_path);
   }
 
   OS_Result_Bytes file = read_entire_file_path(file_path, allocator);

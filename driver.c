@@ -9,6 +9,7 @@
 #include "raytracer.h"
 #include "gltf.h"
 #include "uri.h"
+#include "denoiser.h"
 
 // #define sample_texture sample_texture_nearest
 #define sample_texture sample_texture_bilinear
@@ -131,6 +132,8 @@ internal inline Vec3 normal_map_apply(Image *normal_map, f32 normal_map_strength
   if (normal_map) {
     Vec3 v = sample_texture(normal_map, input->tex_coords);
          v = vec3_add(vec3_scale(v, 2.0), vec3(-1, -1, -1));
+
+    v.g *= -1;
 
     Vec3 t = input->tangent;
     Vec3 b = input->bitangent;
@@ -422,7 +425,7 @@ void print_usage() {
 typedef struct {
   String model;
   isize  width, height, samples, max_bounces, n_threads;
-  b8     verbose;
+  b8     verbose, denoise;
 } Config;
 
 internal b8 parse_command_line_args(Config *config) {
@@ -435,6 +438,11 @@ internal b8 parse_command_line_args(Config *config) {
       }
       if (IDX(arg, 1) == 'V') {
         config->verbose = true;
+        i += 1;
+        continue;
+      }
+      if (IDX(arg, 1) == 'D') {
+        config->denoise = true;
         i += 1;
         continue;
       }
@@ -585,9 +593,6 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
     }
   });
 
-  Slice(Shader) gltf_shaders;
-  slice_init(&gltf_shaders, gltf.materials.len, gltf_allocator);
-
   Slice(PBR_Shader_Data) gltf_shader_data;
   slice_init(&gltf_shader_data, gltf.materials.len, gltf_allocator);
 
@@ -634,10 +639,6 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
       data.texture_metal_roughness = &IDX(gltf_images, texture->source);
     }
     IDX(gltf_shader_data, i) = data;
-    IDX(gltf_shaders, i) = (Shader) {
-      .data = &IDX(gltf_shader_data, i),
-      .proc = disney_shader_proc,
-    };
   });
 
   Gltf_Triangle_Vector gltf_triangles;
@@ -718,6 +719,7 @@ i32 main() {
     .max_bounces = 8,
     .n_threads   = 1,
     .verbose     = false,
+    .denoise     = false,
   };
   if (!parse_command_line_args(&config)) {
     return 1;
@@ -800,6 +802,18 @@ i32 main() {
   fmt_printflnc("%dms", (isize)(time / Millisecond));
   if (config.verbose) {
     fmt_printflnc("%d samples/second", (isize)((u64)config.width * config.height * config.samples / (f64)((f64)time / Second)));
+  }
+
+  if (config.denoise) {
+    Timestamp start_time = time_now();
+
+    Image denoised = image;
+    slice_init(&denoised.pixels, image.pixels.len, context.allocator);
+    denoise_image(&image, &denoised, config.n_threads);
+    image = denoised;
+
+    Duration time = time_since(start_time);
+    fmt_printflnc("Denoising: %dms", (isize)(time / Millisecond));
   }
 
   Fd     output_file   = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));

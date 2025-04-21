@@ -170,7 +170,11 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
 
     f32 d = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
     if (abs_f32(d) < 0.0001f) {
-      d = 1.0f;
+      if (d < 0) {
+        d = -0.0001f;
+      } else {
+        d =  0.0001f;
+      }
     }
 
     f32 inv_d = 1.0f / d;
