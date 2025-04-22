@@ -6,7 +6,8 @@
 #include "codin/os.h"
 #include <stdatomic.h>
 
-#define DENOISING_THRESHOLD 0.0125f
+#define DENOISING_THRESHOLD  0.0125f
+#define NEIGHBOURHOOD_WEIGHT 5
 
 internal inline f32 luminance(Color3 x) {
 	return vec3_dot(x, vec3(0.2126f, 0.7152f, 0.0722f));
@@ -78,20 +79,32 @@ internal void denoiser_thread_proc(Denoising_Context *ctx) {
         Color4 original;
         for_range(yo, -1, 2) {
           for_range(xo, -1, 2) {
-            Color4 c;
-            c.xyz = sample_image(ctx->src, x + xo, y + yo);
-            c.a   = luminance(c.xyz);
+            Color4 color;
+            color.xyz = sample_image(ctx->src, x + xo, y + yo);
+            color.a   = luminance(color.xyz);
             if (xo == 0 && yo == 0) {
-              original = c;
+              original = color;
             }
-            colors[n_colors] = c;
+
+            b8 found = false;
+            for_range(i, 0, n_colors) {
+              if (colors[i].a > color.a) {
+                found = true;
+
+                for (isize j = n_colors; j > i; j -= 1) {
+                  colors[j] = colors[j - 1];
+                }
+
+                colors[i] = color;
+                break;
+              }
+            }
+            if (!found) {
+              colors[n_colors] = color;
+            }
             n_colors += 1;
           }
         }
-
-        sort_slice_by(color_slice, i, j, ({
-          colors[i].a <= colors[j].a;
-        }));
 
         Color4 median = colors[count_of(colors) / 2];
         Color3 mean   = {0};
@@ -103,7 +116,7 @@ internal void denoiser_thread_proc(Denoising_Context *ctx) {
 
         f32 neighbourhood_noisiness = abs_f32(median.a - luminance(mean));
 
-        f32 luminance_diff = abs_f32(median.a - original.a) - neighbourhood_noisiness * 5;
+        f32 luminance_diff = abs_f32(median.a - original.a) - neighbourhood_noisiness * NEIGHBOURHOOD_WEIGHT;
             luminance_diff = clamp(luminance_diff, 0, DENOISING_THRESHOLD) / DENOISING_THRESHOLD;
         store_pixel(ctx->dst, x, y, vec3_lerp(original.xyz, median.xyz, luminance_diff));
       }
