@@ -44,8 +44,8 @@ typedef struct {
 #define CHUNK_SIZE 32
 
 internal void denoiser_thread_proc(Denoising_Context *ctx) {
-  Color3 colors[3 * 3];
-  Slice(Color3) color_slice = slice_array(type_of(color_slice), colors);
+  Color4 colors[3 * 3];
+  Slice(Color4) color_slice = slice_array(type_of(color_slice), colors);
 
   isize width, height, chunks_x, chunks_y, n_chunks;
   width    = ctx->src->width;
@@ -75,32 +75,37 @@ internal void denoiser_thread_proc(Denoising_Context *ctx) {
 
         isize n_colors = 0;
 
+        Color4 original;
         for_range(yo, -1, 2) {
           for_range(xo, -1, 2) {
-            colors[n_colors] = sample_image(ctx->src, x + xo, y + yo);
+            Color4 c;
+            c.xyz = sample_image(ctx->src, x + xo, y + yo);
+            c.a   = luminance(c.xyz);
+            if (xo == 0 && yo == 0) {
+              original = c;
+            }
+            colors[n_colors] = c;
             n_colors += 1;
           }
         }
 
-        Color3 original = colors[count_of(colors) / 2];
-    
         sort_slice_by(color_slice, i, j, ({
-          luminance(colors[i]) <= luminance(colors[j]);
+          colors[i].a <= colors[j].a;
         }));
 
-        Color3 median = colors[count_of(colors) / 2];
+        Color4 median = colors[count_of(colors) / 2];
         Color3 mean   = {0};
         slice_iter_v(color_slice, c, i, {
           if (i == 0 || i == color_slice.len - 1) { continue; }
-          mean = vec3_add(mean, c);
+          mean = vec3_add(mean, c.xyz);
         });
         mean = vec3_scale(mean, 1.0f / (color_slice.len - 2));
 
-        f32 neighbourhood_noisiness = abs_f32(luminance(median) - luminance(mean));
+        f32 neighbourhood_noisiness = abs_f32(median.a - luminance(mean));
 
-        f32 luminance_diff = abs_f32(luminance(median) - luminance(original)) - neighbourhood_noisiness * 5;
+        f32 luminance_diff = abs_f32(median.a - original.a) - neighbourhood_noisiness * 5;
             luminance_diff = clamp(luminance_diff, 0, DENOISING_THRESHOLD) / DENOISING_THRESHOLD;
-        store_pixel(ctx->dst, x, y, vec3_lerp(original, median, luminance_diff));
+        store_pixel(ctx->dst, x, y, vec3_lerp(original.xyz, median.xyz, luminance_diff));
       }
     }
   }
