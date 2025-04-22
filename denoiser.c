@@ -107,14 +107,14 @@ internal void denoiser_thread_proc(Denoising_Context *ctx) {
         }
 
         Color4 median = colors[count_of(colors) / 2];
-        Color3 mean   = {0};
+        f32    mean   = 0;
         slice_iter_v(color_slice, c, i, {
           if (i == 0 || i == color_slice.len - 1) { continue; }
-          mean = vec3_add(mean, c.xyz);
+          mean += c.a;
         });
-        mean = vec3_scale(mean, 1.0f / (color_slice.len - 2));
+        mean /= color_slice.len - 2;
 
-        f32 neighbourhood_noisiness = abs_f32(median.a - luminance(mean));
+        f32 neighbourhood_noisiness = abs_f32(median.a - mean);
 
         f32 luminance_diff = abs_f32(median.a - original.a) - neighbourhood_noisiness * NEIGHBOURHOOD_WEIGHT;
             luminance_diff = clamp(luminance_diff, 0, DENOISING_THRESHOLD) / DENOISING_THRESHOLD;
