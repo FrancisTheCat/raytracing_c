@@ -86,7 +86,7 @@ internal void denoiser_thread_proc(Denoising_Context *ctx) {
               original = color;
             }
 
-            b8 found = false;
+            bool found = false;
             for_range(i, 0, n_colors) {
               if (colors[i].a > color.a) {
                 found = true;

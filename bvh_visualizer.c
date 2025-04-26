@@ -67,7 +67,7 @@ i32 main() {
   Byte_Slice data = slice_make_aligned(Byte_Slice, fi.size, SIMD_ALIGN, context.allocator);
   isize n_read = unwrap_err(file_read(bvh_file, data));
   assert(n_read == fi.size);
-  b8 ok = scene_load_bytes(data, &scene);
+  bool ok = scene_load_bytes(data, &scene);
   assert(ok);
 
   InitWindow(900, 600, "BVH");

@@ -52,7 +52,7 @@ typedef struct {
 } Rendering_Context;
 
 extern void rendering_context_finish(Rendering_Context *context);
-extern b8   rendering_context_is_finished(Rendering_Context *context);
+extern bool rendering_context_is_finished(Rendering_Context *context);
 
 extern void render_thread_proc(Rendering_Context *context);
 

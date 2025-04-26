@@ -5,10 +5,9 @@
 #include "codin/obj.h"
 #include "codin/strconv.h"
 #include "codin/thread.h"
+#include "codin/gltf.h"
 
 #include "raytracer.h"
-#include "gltf.h"
-#include "uri.h"
 #include "denoiser.h"
 
 // #define sample_texture sample_texture_nearest
@@ -105,7 +104,7 @@ internal Color3 sample_background(Image const *image, Vec3 dir) {
 }
 
 internal void load_texture(String path, Image *texture) {
-  b8 ok = stb_image_load_bytes(
+  bool ok = stb_image_load_bytes(
     unwrap_err(read_entire_file_path(path, context.allocator)),
     texture,
     context.allocator
@@ -425,10 +424,10 @@ void print_usage() {
 typedef struct {
   String model;
   isize  width, height, samples, max_bounces, n_threads;
-  b8     verbose, denoise;
+  bool     verbose, denoise;
 } Config;
 
-internal b8 parse_command_line_args(Config *config) {
+internal bool parse_command_line_args(Config *config) {
   for (isize i = 1; i < os_args.len; ) {
     String arg = IDX(os_args, i);
     if (IDX(arg, 0) == '-') {
@@ -489,9 +488,9 @@ internal b8 parse_command_line_args(Config *config) {
   return true;
 }
 
-internal b8 load_model_obj(String path, Byte_Slice data, Triangle_Slice *triangles, Camera *camera) {
+internal bool load_model_obj(String path, Byte_Slice data, Triangle_Slice *triangles, Camera *camera) {
   Obj_File obj = {0};
-  b8 ok = obj_load(bytes_to_string(data), &obj, true, context.allocator);
+  bool ok = obj_load(bytes_to_string(data), &obj, true, context.allocator);
   if (!ok) {
     fmt_eprintlnc("Failed to load model file");
     return 1;
@@ -568,14 +567,14 @@ internal b8 load_model_obj(String path, Byte_Slice data, Triangle_Slice *triangl
   return true;
 }
 
-internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triangles, Camera *camera) {
+internal bool load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triangles, Camera *camera) {
   Growing_Arena_Allocator gltf_arena;
   Allocator gltf_allocator = growing_arena_allocator_init(&gltf_arena, 1 << 16, context.allocator);
 
   Gltf_File gltf;
-  b8 gltf_parse_ok = gltf_parse(data, path, &gltf, gltf_allocator);
+  bool gltf_parse_ok = gltf_parse(data, path, &gltf, gltf_allocator);
   assert(gltf_parse_ok);
-  b8 gltf_load_buffers_ok = gltf_load_buffers(path, &gltf, gltf_allocator);
+  bool gltf_load_buffers_ok = gltf_load_buffers(path, &gltf, gltf_allocator);
   assert(gltf_load_buffers_ok);
 
   slice_iter_v(gltf.nodes, node, i, {
@@ -600,7 +599,7 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
   slice_init(&gltf_images, gltf.images.len, gltf_allocator);
 
   slice_iter_v(gltf.images, image, i, {
-    b8 ok = stb_image_load_bytes(image.data, &IDX(gltf_images, i), gltf_allocator);
+    bool ok = stb_image_load_bytes(image.data, &IDX(gltf_images, i), gltf_allocator);
     if (!ok) {
       fmt_eprintflnc("Failed to load image: type: '%S', uri: '%S', len: %d", image.mime_type, image.uri, image.data.len);
       return false;
@@ -664,7 +663,7 @@ internal b8 load_model_gltf(String path, Byte_Slice data, Triangle_Slice *triang
   return true;
 }
 
-internal b8 load_model_file(String path, Triangle_Slice *triangles, Camera *camera) {
+internal bool load_model_file(String path, Triangle_Slice *triangles, Camera *camera) {
   isize extension_offset = -1;
   for (isize i = path.len - 1; i >= 0; i -= 1) {
     if (IDX(path, i) == '.') {
@@ -679,7 +678,7 @@ internal b8 load_model_file(String path, Triangle_Slice *triangles, Camera *came
   }
   String extension = slice_start(path, extension_offset);
 
-  b8 is_obj = false;
+  bool is_obj = false;
 
   STRING_SWITCH(extension)
   STRING_CASE_C(".obj")
@@ -699,7 +698,7 @@ internal b8 load_model_file(String path, Triangle_Slice *triangles, Camera *came
     return false;
   });
 
-  b8 ok;
+  bool ok;
   if (is_obj) {
     ok = load_model_obj(path, data, triangles, camera);
   } else {

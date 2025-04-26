@@ -86,7 +86,7 @@ internal inline void ray_spheres_hit_8(
   }
 }
 
-internal inline b8 ray_triangles_hit_8(
+internal inline bool ray_triangles_hit_8(
   Ray       const *ray,
   Triangles const *triangles,
   isize            offset,
@@ -248,7 +248,7 @@ internal inline f32 min_f32x16(f32x16 vec, f32 epsilon, i32 *index) {
   return min_value;
 }
 
-internal inline b8 ray_triangles_hit_16(
+internal inline bool ray_triangles_hit_16(
   Ray       const *ray,
   Triangles const *triangles,
   isize            offset,
@@ -788,7 +788,7 @@ extern void lightmap_bake(Image const *lightmap, Scene const *scene, isize sampl
   }
 }
 
-extern b8 rendering_context_is_finished(Rendering_Context *context) {
+extern bool rendering_context_is_finished(Rendering_Context *context) {
   return context->n_threads == 0;
 }
 

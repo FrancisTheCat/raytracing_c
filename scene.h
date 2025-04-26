@@ -23,7 +23,7 @@ typedef struct {
 typedef struct {
   Vec3   direction;
   Color3 tint, emission;
-  b8     terminate;
+  bool   terminate;
 } Shader_Output;
 
 typedef void (*Shader_Proc)(rawptr, Shader_Input const *, Shader_Output *);
@@ -94,5 +94,5 @@ typedef struct {
 } Scene;
 
 extern void scene_save_writer(Writer const *w, Scene const *scene);
-extern b8   scene_load_bytes(Byte_Slice data, Scene *scene);
+extern bool scene_load_bytes(Byte_Slice data, Scene *scene);
 extern void scene_init(Scene *scene, Triangle_Slice src_triangles, Allocator allocator);

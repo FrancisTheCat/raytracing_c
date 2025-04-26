@@ -31,7 +31,7 @@ extern void scene_save_writer(Writer const *w, Scene const *scene) {
   write_bytes(w, tris_data);
 }
 
-extern b8 scene_load_bytes(Byte_Slice data, Scene *scene) {
+extern bool scene_load_bytes(Byte_Slice data, Scene *scene) {
   assert((uintptr)data.data % 32 == 0);
 
   Scene_File_Header header;
