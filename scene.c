@@ -1,7 +1,6 @@
 #include "codin/codin.h"
 
 #include "codin/allocators.h"
-#include "codin/fmt.h"
 #include "codin/io.h"
 #include "codin/sort.h"
 
@@ -47,12 +46,9 @@ extern bool scene_load_bytes(Byte_Slice data, Scene *scene) {
   scene->camera         = header.camera;
   scene->bvh.depth      = header.bvh_depth;
   scene->bvh.nodes.len  = header.n_nodes;
-  scene->bvh.nodes.cap  = header.n_nodes;
   scene->bvh.nodes.data = (BVH_Node *)(data.data + size_of(header));
 
   assert((uintptr)scene->bvh.nodes.data % 32 == 0);
-
-  scene->bvh.nodes.allocator = panic_allocator();
 
   f32 *tris_data = (f32 *)(data.data + size_of(header) + header.n_nodes * size_of(BVH_Node));
 
@@ -272,24 +268,6 @@ internal isize bvh_required_depth(isize n_triangles) {
   return i;
 }
 
-internal isize bvh_n_leaf_nodes(isize depth) {
-  isize n = 1;
-  for_range(i, 0, depth) {
-    n *= SIMD_WIDTH;
-  }
-  return n;
-}
-
-internal isize bvh_n_internal_nodes(isize depth) {
-  isize n = 1;
-  isize nodes = 0;
-  for_range(i, 0, depth) {
-    nodes += n;
-    n     *= SIMD_WIDTH;
-  }
-  return nodes;
-}
-
 internal isize bvh_partition_triangles(isize n_triangles, isize per_child) {
   isize n = 0, left = n_triangles;
   while (n < n_triangles / 2 && left > per_child) {
@@ -299,10 +277,8 @@ internal isize bvh_partition_triangles(isize n_triangles, isize per_child) {
   return n;
 }
 
-internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
-  isize n_leaves = bvh_n_leaf_nodes(depth);
-
-  isize per_child = n_leaves;
+internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth, BVH_Index index) {
+  isize per_child = bvh_n_leaf_nodes(depth);
 
   if (triangles.len <= SIMD_WIDTH) {
     triangles_append(&scene->triangles, triangles);
@@ -331,7 +307,7 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
     right = slice_start(slice, split);
     
     f32 min_surface_area = F32_INFINITY;
-    i32 best_axis = 0;
+    i32 best_axis        = 0;
     for_range(axis, 0, 3) {
       sort_triangle_slice(slice, axis);
       AABB a, b;
@@ -367,16 +343,7 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
     }
   }
 
-  // [ 0, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, 1, 2, 3, 4, 4, 3, 4, 4, 2, 3, 4, 4, 3, 4, 4, ]
-  // [ 0, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, 1, 2, 2, 2, 2, ]
-
-  // child i of node n:
-  // n + 1 + i * internal_nodes(depth - 1)
-
   BVH_Node node = {0};
-  isize index = scene->bvh.nodes.len;
-  vector_append(&scene->bvh.nodes, node);
-
   slice_iter_v(slice_array(Slice(Triangle_Slice), finished), tris, i, {
     if (i >= n_finished) {
       break;
@@ -392,7 +359,7 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
     node.maxs.y[i] = aabb.max.y;
     node.maxs.z[i] = aabb.max.z;
 
-    bvh_build(scene, tris, depth - 1);
+    bvh_build(scene, tris, depth - 1, index * SIMD_WIDTH + 1 + i);
   });
 
   IDX(scene->bvh.nodes, index) = node;
@@ -400,15 +367,14 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth) {
 }
 
 extern void scene_init(Scene *scene, Triangle_Slice triangles, Allocator allocator) {
-  isize depth      = bvh_required_depth(triangles.len);
-  isize n_internal = bvh_n_internal_nodes(depth);
-  scene->bvh.depth = depth;
+  isize depth                = bvh_required_depth(triangles.len);
+  isize n_internal           = bvh_n_internal_nodes(depth);
+  scene->bvh.depth           = depth;
+  scene->bvh.last_row_offset = n_internal;
 
-  vector_init(&scene->bvh.nodes, 0, n_internal, allocator);
+  slice_init(&scene->bvh.nodes, n_internal, allocator);
   triangles_init(&scene->triangles, 0, ((triangles.len + SIMD_WIDTH) / SIMD_WIDTH) * SIMD_WIDTH, allocator);
-
   scene->triangles.allocator = panic_allocator();
-  scene->bvh.nodes.allocator = panic_allocator();
   
-  bvh_build(scene, triangles, depth);
+  bvh_build(scene, triangles, depth, 0);
 }

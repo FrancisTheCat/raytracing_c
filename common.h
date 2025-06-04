@@ -7,6 +7,9 @@
 
 #define EPSILON 0.0001f
 
+#undef  IDX
+#define IDX(arr, i) (arr).data[(i)]
+
 internal thread_local u32 random_state = 0;
 
 internal u32 rand_u32() {

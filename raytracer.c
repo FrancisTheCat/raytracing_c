@@ -3,15 +3,10 @@
 #include "codin/codin.h"
 #include "codin/image.h"
 #include "codin/linalg.h"
-#include "codin/obj.h"
 #include "codin/os.h"
-#include "codin/sort.h"
-#include "codin/strconv.h"
-#include "codin/thread.h"
 #include "codin/time.h"
 
 #include "scene.h"
-#include "scene.c"
 
 #include "stdatomic.h"
 
@@ -447,13 +442,13 @@ internal inline void ray_spheres_hit_16(
 
 internal void ray_bvh_node_hit(
   Ray            *ray,
-  Scene    const *scene,
-  BVH_Node       *node,
+  Scene const    *scene,
+  BVH_Index       bvh_index,
   Hit            *hit,
-  isize           offset,
   isize           depth
 ) {
   f32 distances[SIMD_WIDTH] __attribute__((aligned(SIMD_ALIGN)));
+  BVH_Node *node = &IDX(scene->bvh.nodes, bvh_index);
   ray_aabbs_hit_SIMD(ray, EPSILON, hit->distance, node->mins, node->maxs, &distances[0]);
 
   isize n_leaves = bvh_n_leaf_nodes(depth);
@@ -476,11 +471,11 @@ internal void ray_bvh_node_hit(
       return;
     }
 
+    BVH_Index child = SIMD_WIDTH * bvh_index + 1 + min_index;
     if (depth == 1) {
-      ray_triangles_hit_SIMD(ray, &scene->triangles, offset + min_index * SIMD_WIDTH, hit);
+      ray_triangles_hit_SIMD(ray, &scene->triangles, (child - scene->bvh.last_row_offset) * SIMD_WIDTH, hit);
     } else {
-      BVH_Node *child = node + 1 + min_index * bvh_n_internal_nodes(depth - 1);
-      ray_bvh_node_hit(ray, scene, child, hit, offset + n_leaves * min_index, depth - 1);
+      ray_bvh_node_hit(ray, scene, child, hit, depth - 1);
     }
     
     distances[min_index] = F32_INFINITY;
@@ -503,7 +498,7 @@ internal void ray_scene_hit(Ray *ray, Scene const *scene, Hit *hit) {
 #if 0
   ray_triangles_hit(ray, &scene->triangles, hit);
 #else
-  ray_bvh_node_hit(ray, scene, &IDX(scene->bvh.nodes, 0), hit, 0, scene->bvh.depth);
+  ray_bvh_node_hit(ray, scene, 0, hit, scene->bvh.depth);
 #endif
 }
 

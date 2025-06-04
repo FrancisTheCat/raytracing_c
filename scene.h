@@ -81,9 +81,12 @@ typedef struct {
   } BVH_Node;
 #endif
 
+typedef int BVH_Index;
+
 typedef struct {
-  Vector(BVH_Node) nodes;
-  isize            depth;
+  Slice(BVH_Node) nodes;
+  isize           depth;
+  isize           last_row_offset;
 } BVH;
 
 typedef struct {
@@ -96,3 +99,21 @@ typedef struct {
 extern void scene_save_writer(Writer const *w, Scene const *scene);
 extern bool scene_load_bytes(Byte_Slice data, Scene *scene);
 extern void scene_init(Scene *scene, Triangle_Slice src_triangles, Allocator allocator);
+
+internal isize bvh_n_leaf_nodes(isize depth) {
+  isize n = 1;
+  for_range(i, 0, depth) {
+    n *= SIMD_WIDTH;
+  }
+  return n;
+}
+
+internal isize bvh_n_internal_nodes(isize depth) {
+  isize n = 1;
+  isize nodes = 0;
+  for_range(i, 0, depth) {
+    nodes += n;
+    n     *= SIMD_WIDTH;
+  }
+  return nodes;
+}
