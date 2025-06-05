@@ -762,6 +762,7 @@ i32 main() {
     fmt_printflnc("Bounces:   %d", config.max_bounces);
     fmt_printflnc("Threads:   %d", config.n_threads);
     fmt_printflnc("BVH-Nodes: %d", scene.bvh.nodes.len);
+    fmt_printflnc("BVH-Depth: %d", scene.bvh.depth);
     fmt_printflnc("Triangles: %d", triangles.len);
 
     fmt_printlnc("");

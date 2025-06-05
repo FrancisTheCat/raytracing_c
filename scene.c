@@ -1,8 +1,11 @@
 #include "codin/codin.h"
 
-#include "codin/allocators.h"
 #include "codin/io.h"
+#include "codin/os.h"
 #include "codin/sort.h"
+#include "codin/thread.h"
+
+#include "stdatomic.h"
 
 #include "raytracer.h"
 #include "scene.h"
@@ -16,7 +19,7 @@ extern void scene_save_writer(Writer const *w, Scene const *scene) {
   Scene_File_Header header = {
     .version     = 0,
     .n_nodes     = scene->bvh.nodes.len,
-    .n_triangles = scene->triangles.cap,
+    .n_triangles = scene->triangles.len,
     .bvh_depth   = scene->bvh.depth,
     .camera      = scene->camera,
   };
@@ -24,7 +27,7 @@ extern void scene_save_writer(Writer const *w, Scene const *scene) {
   Byte_Slice node_data = slice_to_bytes(scene->bvh.nodes);
   Byte_Slice tris_data = {
     .data = (byte *)scene->triangles.x[0],
-    .len  = TRIANGLES_ALLOCATION_SIZE(scene->triangles.cap),
+    .len  = TRIANGLES_ALLOCATION_SIZE(scene->triangles.len),
   };
   write_bytes(w, node_data);
   write_bytes(w, tris_data);
@@ -67,96 +70,54 @@ extern bool scene_load_bytes(Byte_Slice data, Scene *scene) {
   scene->triangles.z[2] = tris_data + header.n_triangles * 8;
 
   scene->triangles.aos = (Triangle_AOS *)(tris_data + header.n_triangles * 9);
-
   scene->triangles.len = header.n_triangles;
-  scene->triangles.cap = header.n_triangles;
-
-  scene->triangles.allocator = panic_allocator();
 
   return true;
 }
 
-internal void triangles_init(Triangles *triangles, isize len, isize cap, Allocator allocator) {
-  if (cap % SIMD_WIDTH) {
-    cap += SIMD_WIDTH - cap % SIMD_WIDTH;
+internal void triangles_init(Triangles *triangles, isize len, Allocator allocator) {
+  while (len % SIMD_WIDTH) {
+    len += 1;
   }
-  triangles->len       = len;
-  triangles->cap       = cap;
-  triangles->allocator = allocator;
+  triangles->len = len;
 
-  f32 *data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(cap), SIMD_ALIGN, allocator));
+  f32 *data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(len), SIMD_ALIGN, allocator));
 
-  triangles->x[0] = data + cap * 0;
-  triangles->x[1] = data + cap * 1;
-  triangles->x[2] = data + cap * 2;
+  triangles->x[0] = data + len * 0;
+  triangles->x[1] = data + len * 1;
+  triangles->x[2] = data + len * 2;
 
-  triangles->y[0] = data + cap * 3;
-  triangles->y[1] = data + cap * 4;
-  triangles->y[2] = data + cap * 5;
+  triangles->y[0] = data + len * 3;
+  triangles->y[1] = data + len * 4;
+  triangles->y[2] = data + len * 5;
 
-  triangles->z[0] = data + cap * 6;
-  triangles->z[1] = data + cap * 7;
-  triangles->z[2] = data + cap * 8;
+  triangles->z[0] = data + len * 6;
+  triangles->z[1] = data + len * 7;
+  triangles->z[2] = data + len * 8;
 
-  triangles->aos = (Triangle_AOS *)(data + cap * 9);
+  triangles->aos = (Triangle_AOS *)(data + len * 9);
 }
 
-internal void triangles_destroy(Triangles *triangles) {
-  mem_free(triangles->x[0], TRIANGLES_ALLOCATION_SIZE(triangles->cap), triangles->allocator);
+internal void triangles_destroy(Triangles *triangles, Allocator allocator) {
+  mem_free(triangles->x[0], TRIANGLES_ALLOCATION_SIZE(triangles->len), allocator);
 }
 
-internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
-  if (triangles->len + v.len >= triangles->cap) {
-    isize new_cap = max(triangles->cap * 2, SIMD_WIDTH);
-    if (triangles->cap + v.len > new_cap) {
-      new_cap  = triangles->cap * 2 + ((v.len + SIMD_WIDTH + 1) / SIMD_WIDTH) * SIMD_WIDTH;
-    }
-    assert(new_cap % 8 == 0);
-    f32 *new_data = (f32 *)unwrap_err(mem_alloc_aligned(TRIANGLES_ALLOCATION_SIZE(new_cap), SIMD_ALIGN, triangles->allocator));
-
-    mem_tcopy(new_data + new_cap * 0, triangles->x[0], triangles->len);
-    mem_tcopy(new_data + new_cap * 1, triangles->x[1], triangles->len);
-    mem_tcopy(new_data + new_cap * 2, triangles->x[2], triangles->len);
-
-    mem_tcopy(new_data + new_cap * 3, triangles->y[0], triangles->len);
-    mem_tcopy(new_data + new_cap * 4, triangles->y[1], triangles->len);
-    mem_tcopy(new_data + new_cap * 5, triangles->y[2], triangles->len);
-
-    mem_tcopy(new_data + new_cap * 6, triangles->z[0], triangles->len);
-    mem_tcopy(new_data + new_cap * 7, triangles->z[1], triangles->len);
-    mem_tcopy(new_data + new_cap * 8, triangles->z[2], triangles->len);
-
-    mem_tcopy((Triangle_AOS *)(new_data + new_cap * 9), triangles->aos, triangles->len);
-
-    triangles->x[0] = new_data + new_cap * 0;
-    triangles->x[1] = new_data + new_cap * 1;
-    triangles->x[2] = new_data + new_cap * 2;
-
-    triangles->y[0] = new_data + new_cap * 3;
-    triangles->y[1] = new_data + new_cap * 4;
-    triangles->y[2] = new_data + new_cap * 5;
-
-    triangles->z[0] = new_data + new_cap * 6;
-    triangles->z[1] = new_data + new_cap * 7;
-    triangles->z[2] = new_data + new_cap * 8;
-
-    triangles->aos = (Triangle_AOS *)(new_data + new_cap * 9);
-
-    triangles->cap = new_cap;
-  }
+internal void triangles_insert(Triangles *triangles, Triangle_Slice v, isize offset) {
+  assert(v.len + offset <= triangles->len);
+  assert(offset         >= 0);
 
   slice_iter_v(v, t, i, {
-    triangles->x[0][triangles->len + i] = t.positions[0].x;
-    triangles->x[1][triangles->len + i] = t.positions[1].x;
-    triangles->x[2][triangles->len + i] = t.positions[2].x;
+    triangles->x[0][offset + i] = t.positions[0].x;
+    triangles->x[1][offset + i] = t.positions[1].x;
+    triangles->x[2][offset + i] = t.positions[2].x;
 
-    triangles->y[0][triangles->len + i] = t.positions[0].y;
-    triangles->y[1][triangles->len + i] = t.positions[1].y;
-    triangles->y[2][triangles->len + i] = t.positions[2].y;
+    triangles->y[0][offset + i] = t.positions[0].y;
+    triangles->y[1][offset + i] = t.positions[1].y;
+    triangles->y[2][offset + i] = t.positions[2].y;
 
-    triangles->z[0][triangles->len + i] = t.positions[0].z;
-    triangles->z[1][triangles->len + i] = t.positions[1].z;
-    triangles->z[2][triangles->len + i] = t.positions[2].z;
+    triangles->z[0][offset + i] = t.positions[0].z;
+    triangles->z[1][offset + i] = t.positions[1].z;
+    triangles->z[2][offset + i] = t.positions[2].z;
 
     Vec3 edge1 = vec3_sub(vec3(t.positions[1].x, t.positions[1].y, t.positions[1].z), vec3(t.positions[0].x, t.positions[0].y, t.positions[0].z));
     Vec3 edge2 = vec3_sub(vec3(t.positions[2].x, t.positions[2].y, t.positions[2].z), vec3(t.positions[0].x, t.positions[0].y, t.positions[0].z));
@@ -178,7 +139,7 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
     Vec3 tangent   = vec3_normalize(vec3_scale(vec3_sub(vec3_scale(edge1, delta_uv2.y), vec3_scale(edge2, delta_uv1.y)), inv_d));
     Vec3 bitangent = vec3_normalize(vec3_scale(vec3_sub(vec3_scale(edge2, delta_uv1.x), vec3_scale(edge1, delta_uv2.x)), inv_d));
 
-    triangles->aos[triangles->len + i] = (Triangle_AOS) {
+    triangles->aos[offset + i] = (Triangle_AOS) {
       .shader       = t.shader,
       .normal       = vec3_normalize(vec3_cross(edge1, edge2)),
       .normal_a     = t.normals[0],
@@ -191,7 +152,6 @@ internal void triangles_append(Triangles *triangles, Triangle_Slice v) {
       .bitangent    = bitangent,
     };
   });
-  triangles->len += v.len;
 }
 
 internal f32 aabb_surface_area(AABB *aabb) {
@@ -248,11 +208,15 @@ internal void sort_triangle_slice(Triangle_Slice slice, isize axis) {
     i,
     j,
     ({
-      AABB aabb_i, aabb_j;
-      aabb_triangle(&IDX(slice, i), &aabb_i);
-      aabb_triangle(&IDX(slice, j), &aabb_j);
-
-      aabb_i.min.data[axis] <= aabb_j.min.data[axis];
+      Triangle *t_i = &IDX(slice, i);
+      Triangle *t_j = &IDX(slice, j);
+      f32 centroid_i = t_i->positions[0].data[axis] +
+                       t_i->positions[1].data[axis] +
+                       t_i->positions[2].data[axis];
+      f32 centroid_j = t_j->positions[0].data[axis] +
+                       t_j->positions[1].data[axis] +
+                       t_j->positions[2].data[axis];
+      centroid_i < centroid_j;
     })
   );
 }
@@ -272,22 +236,93 @@ internal isize bvh_partition_triangles(isize n_triangles, isize per_child) {
   isize n = 0, left = n_triangles;
   while (n < n_triangles / 2 && left > per_child) {
     n    += per_child;
-    left -= n_triangles;
+    left -= per_child;
   }
   return n;
 }
 
-internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth, BVH_Index index) {
-  isize per_child = bvh_n_leaf_nodes(depth);
+typedef struct {
+  isize          depth;
+  BVH_Index      index;
+  Triangle_Slice triangles;
+  _Atomic bool   ready;
+} BVH_Build_Task;
 
-  if (triangles.len <= SIMD_WIDTH) {
-    triangles_append(&scene->triangles, triangles);
-    while (scene->triangles.len % SIMD_WIDTH) {
-      scene->triangles.len += 1;
+typedef struct {
+  Scene                *scene;
+  Slice(BVH_Build_Task) tasks;
+  _Atomic isize         read;
+  _Atomic isize         write;
+  _Atomic isize         n_working;
+  _Atomic isize         n_active;
+} BVH_Construction_Context;
+
+internal void bvh_build_thread(BVH_Construction_Context *ctx);
+
+internal void bvh_build_threaded(Scene *scene, Triangle_Slice triangles, isize n_threads) {
+  BVH_Construction_Context ctx = {
+    .scene     = scene,
+    .write     = 1,
+    .n_active  = n_threads,
+  };
+  slice_init(&ctx.tasks, scene->bvh.nodes.len, context.temp_allocator);
+  IDX(ctx.tasks, 0) = (BVH_Build_Task) {
+    .triangles = triangles,
+    .depth     = scene->bvh.depth,
+    .index     = 0,
+    .ready     = true,
+  };
+
+  ctx.n_working = 1;
+  for_range(thread_id, 0, n_threads - 1) {
+    thread_create((Thread_Proc)bvh_build_thread, &ctx, THREAD_STACK_DEFAULT, THREAD_TLS_DEFAULT);
+  }
+  ctx.n_working -= 1;
+  bvh_build_thread(&ctx);
+
+  while (ctx.n_active) {
+    processor_yield();
+  }
+}
+
+internal void bvh_build(BVH_Construction_Context *ctx, Scene *scene, Triangle_Slice triangles, isize depth, BVH_Index index);
+
+internal void bvh_build_thread(BVH_Construction_Context *ctx) {
+  for (;;) {
+    isize read = atomic_fetch_add(&ctx->read, 1);
+    while (read >= ctx->write) {
+      if (ctx->n_working == 0) {
+        ctx->n_active -= 1;
+        return;
+      }
+      processor_yield();
     }
-    assert(scene->triangles.len <= scene->triangles.cap);
+
+    BVH_Build_Task const *task = &IDX(ctx->tasks, read);
+    ctx->n_working += 1;
+    while (!task->ready) {
+      processor_yield();
+    }
+    bvh_build(ctx, ctx->scene, task->triangles, task->depth, task->index);
+    ctx->n_working -= 1;
+  }
+}
+
+internal void bvh_build(
+  BVH_Construction_Context *ctx,
+  Scene                    *scene,
+  Triangle_Slice            triangles,
+  isize                     depth,
+  BVH_Index                 index
+) {
+  if (triangles.len <= SIMD_WIDTH) {
+    triangles_insert(&scene->triangles, triangles, (index - scene->bvh.last_row_offset) * SIMD_WIDTH);
     return;
   }
+
+  isize per_child = bvh_n_leaf_nodes(depth);
+  assert(per_child * SIMD_WIDTH >= triangles.len);
+  assert(per_child >= SIMD_WIDTH);
 
   Triangle_Slice slices[SIMD_WIDTH] = { triangles, };
   isize        n_slices = 1;
@@ -298,7 +333,7 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth, BVH
   while (n_slices != 0) {
     n_slices -= 1;
     Triangle_Slice slice = slices[n_slices];
-    assert(slice.len > per_child);
+    assert(slice.len > SIMD_WIDTH);
 
     isize split = bvh_partition_triangles(slice.len, per_child);
 
@@ -324,20 +359,21 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth, BVH
       sort_triangle_slice(slice, best_axis);
     }
 
-    assert(n_slices   < count_of(slices));
-    assert(n_finished < count_of(finished));
-
     if (left.len > per_child) {
+      assert(n_slices < count_of(slices));
       slices[n_slices] = left;
       n_slices += 1;
     } else if (left.len) {
+      assert(n_finished < count_of(finished));
       finished[n_finished] = left;
       n_finished += 1;
     }
     if (right.len > per_child) {
+      assert(n_slices < count_of(slices));
       slices[n_slices] = right;
       n_slices += 1;
     } else if (right.len) {
+      assert(n_finished < count_of(finished));
       finished[n_finished] = right;
       n_finished += 1;
     }
@@ -359,7 +395,18 @@ internal void bvh_build(Scene *scene, Triangle_Slice triangles, isize depth, BVH
     node.maxs.y[i] = aabb.max.y;
     node.maxs.z[i] = aabb.max.z;
 
-    bvh_build(scene, tris, depth - 1, index * SIMD_WIDTH + 1 + i);
+    isize child_index = index * SIMD_WIDTH + 1 + i;
+    if (ctx == nil || depth <= 3) {
+      bvh_build(nil, scene, tris, depth - 1, child_index);
+    } else {
+      isize write = atomic_fetch_add(&ctx->write, 1);
+      IDX(ctx->tasks, write) = (BVH_Build_Task) {
+        .triangles = tris,
+        .depth     = depth - 1,
+        .index     = child_index,
+      };
+      IDX(ctx->tasks, write).ready = true;
+    }
   });
 
   IDX(scene->bvh.nodes, index) = node;
@@ -373,8 +420,7 @@ extern void scene_init(Scene *scene, Triangle_Slice triangles, Allocator allocat
   scene->bvh.last_row_offset = n_internal;
 
   slice_init(&scene->bvh.nodes, n_internal, allocator);
-  triangles_init(&scene->triangles, 0, ((triangles.len + SIMD_WIDTH) / SIMD_WIDTH) * SIMD_WIDTH, allocator);
-  scene->triangles.allocator = panic_allocator();
+  triangles_init(&scene->triangles, bvh_n_leaf_nodes(depth) * SIMD_WIDTH, allocator);
   
-  bvh_build(scene, triangles, depth, 0);
+  bvh_build_threaded(scene, triangles, 12);
 }

@@ -3,6 +3,7 @@
 #include "codin/codin.h"
 #include "codin/image.h"
 #include "codin/linalg.h"
+#include "codin/sync.h"
 
 #include "common.h"
 
@@ -55,8 +56,7 @@ typedef struct {
   f32          *y[3];
   f32          *z[3];
   Triangle_AOS *aos;
-  i32           len, cap;
-  Allocator     allocator;
+  i32           len;
 } Triangles;
 
 #define TRIANGLES_ALLOCATION_SIZE(N) \
