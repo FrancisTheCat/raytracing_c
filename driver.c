@@ -418,13 +418,27 @@ internal void debug_shader_proc(rawptr _data, Shader_Input const *input, Shader_
 }
 
 void print_usage() {
-  fmt_eprintflnc("%S -W <width> -H <height> -S <samples> -T <threads> -B <max_bounces> <model.(obj|glb|gltf)>", IDX(os_args, 0));
+  fmt_eprintflnc("%S -W <width> -H <height> -S <samples> -T <threads> -B <max_bounces> <model.(obj|glb|gltf)> -O output.(qoi|png|ppm)", IDX(os_args, 0));
 }
+
+#define OUTPUT_FORMATS(X) \
+  X(Output_Format_PNG)    \
+  X(Output_Format_QOI)    \
+  X(Output_Format_PPM)    \
+
+X_ENUM(Output_Format, OUTPUT_FORMATS)
+
+const String output_format_suffixes[] = {
+  [Output_Format_PNG] = LIT(".png"),
+  [Output_Format_QOI] = LIT(".qoi"),
+  [Output_Format_PPM] = LIT(".ppm"),
+};
 
 typedef struct {
   String model;
   isize  width, height, samples, max_bounces, n_threads;
-  bool     verbose, denoise;
+  bool   verbose, denoise;
+  String output_path;
 } Config;
 
 internal bool parse_command_line_args(Config *config) {
@@ -448,6 +462,11 @@ internal bool parse_command_line_args(Config *config) {
       if (i == os_args.len - 1) {
         print_usage();
         return false;
+      }
+      if (IDX(arg, 1) == 'O') {
+        config->output_path = IDX(os_args, i + 1);
+        i += 2;
+        continue;
       }
 
       String arg2   = IDX(os_args, i + 1);
@@ -719,6 +738,7 @@ i32 main() {
     .n_threads   = 1,
     .verbose     = false,
     .denoise     = false,
+    .output_path = LIT("output.png"),
   };
   if (!parse_command_line_args(&config)) {
     return 1;
@@ -816,8 +836,43 @@ i32 main() {
     fmt_printflnc("Denoising: %dms", (isize)(time / Millisecond));
   }
 
-  Fd     output_file   = unwrap_err(file_open(LIT("output.png"), FP_Read_Write | FP_Create | FP_Truncate));
-  Writer output_writer = writer_from_handle(output_file);
-  assert(png_save_writer(&output_writer, &image));
-  file_close(output_file);
+  Output_Format output_format       = Output_Format_PNG;
+  bool          output_format_found = false;
+
+  enum_iter(Output_Format, fmt) {
+    if (string_has_suffix(config.output_path, output_format_suffixes[fmt])) {
+      output_format       = fmt;
+      output_format_found = true;
+    }
+  }
+
+  if (!output_format_found) {
+    fmt_printflnc("output format not recognized for output path '%S', defaulting to png", config.output_path);
+  }
+
+  Fd        output_file       = unwrap_err(file_open(config.output_path, FP_Read_Write | FP_Create | FP_Truncate));
+  Writer    output_writer     = writer_from_handle(output_file);
+  Timestamp start_output_time = time_now();
+
+  bool output_ok = false;
+  switch (output_format) {
+  case Output_Format_PNG: {
+    output_ok = png_save_writer(&output_writer, &image);
+  } break;
+  case Output_Format_QOI: {
+    output_ok = qoi_save_writer(&output_writer, &image);
+  } break;
+  case Output_Format_PPM: {
+    output_ok = ppm_save_writer(&output_writer, &image);
+  } break;
+  }
+
+  if (!output_ok) {
+    fmt_eprintlnc("Failed to encode output file");
+    return 1;
+  }
+
+  if (config.verbose) {
+    fmt_printflnc("Output file written in %dms", time_since(start_output_time) / Millisecond);
+  }
 }
